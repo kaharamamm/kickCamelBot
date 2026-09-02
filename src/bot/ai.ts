@@ -56,7 +56,8 @@ async function geminiText(
     generationConfig: { maxOutputTokens: tokens, temperature },
   });
   const started = Date.now();
-  const models = timeoutMs <= 2500 ? MODEL_FALLBACKS.slice(0, 1) : MODEL_FALLBACKS.slice(0, 2);
+  const models =
+    timeoutMs <= 2500 ? MODEL_FALLBACKS.slice(0, 1) : timeoutMs >= 10_000 ? MODEL_FALLBACKS.slice(0, 3) : MODEL_FALLBACKS.slice(0, 2);
   for (const model of models) {
     const left = timeoutMs - (Date.now() - started);
     if (left < 350) break;
@@ -97,13 +98,13 @@ async function geminiOnce(model: string, body: string, timeoutMs: number): Promi
 export async function generateRaw(
   prompt: string,
   extraSystem = "",
-  opts?: { standalone?: boolean },
+  opts?: { standalone?: boolean; timeoutMs?: number; tokens?: number; temperature?: number },
 ): Promise<string | null> {
   return geminiText(prompt, extraSystem, {
     standalone: opts?.standalone,
-    timeoutMs: 8000,
-    tokens: 220,
-    temperature: 0.7,
+    timeoutMs: opts?.timeoutMs ?? 8000,
+    tokens: opts?.tokens ?? 220,
+    temperature: opts?.temperature ?? 0.7,
   });
 }
 
@@ -179,7 +180,7 @@ export async function replyWithAi(
 
   const greeting = isGreeting(chat.content);
   const tier = extra?.insulted || extra?.calledBot || greeting ? "snappy" : askTier(chat.content);
-  const timeoutMs = tier === "hard" ? 10_000 : tier === "research" ? 5_000 : 2_500;
+  const timeoutMs = tier === "hard" ? 12_000 : tier === "research" ? 8_000 : 5_000;
   const weather = tier === "snappy" ? weatherCached() : await yenimahalleWeather();
   const userKey = String(chat.sender.user_id);
   const prior = greeting ? [] : (history.get(userKey) ?? []).slice(tier === "snappy" ? -2 : -4);
@@ -249,7 +250,7 @@ export async function replyWithAi(
   });
   if (!text) {
     if (extra?.fromKing) {
-      return extra.lang === "en" ? "Yeah, I'm here." : "Buradayım.";
+      return kingTimeoutFallback(chat.content, extra.lang);
     }
     if (extra?.parentWasBot || extra?.force) {
       return extra.lang === "en" ? "Still talking to me. Say it again." : "Hâlâ bana yazıyorsun. Devam et.";
@@ -265,13 +266,26 @@ function askTier(content: string): "snappy" | "research" | "hard" {
   const t = content.toLowerCase();
   if (t.length > 220 || /\b(compare|analiz|explain in detail|adım adım|break down)\b/i.test(t)) return "hard";
   if (
-    /\b(weather|hava durumu|sıcak|sicak|yağmur|yagmur|derece|saat kaç|what time|tarih|neden|why |how (do|does|did|to|can)|explain|wiki|mmr|rank|who is|kimdir|nasıl çalış)\b/i.test(
+    /\b(weather|hava durumu|sıcak|sicak|yağmur|yagmur|derece|saat kaç|what time|tarih|neden|why |how (do|does|did|to|can)|explain|wiki|mmr|rank|who is|who am i|kimim|kimdir|nasıl çalış)\b/i.test(
       t,
     )
   ) {
     return "research";
   }
   return "snappy";
+}
+
+function kingTimeoutFallback(content: string, lang?: "tr" | "en" | "other"): string {
+  const t = content.toLowerCase();
+  if (/ben kimim|kimim ben|who am i/i.test(t)) {
+    return lang === "en"
+      ? "You're mcvckaharamamm. This is your chat."
+      : "Sen mcvckaharamamm'sin. Burası senin sohbetin.";
+  }
+  if (/öldün( mü| mu)?|oldun mu|orada m[ıi]s[ıi]n|you (there|dead|alive)|still (there|alive)/i.test(t)) {
+    return lang === "en" ? "Yeah, I'm here." : "Buradayım.";
+  }
+  return lang === "en" ? "Say that again, I missed it." : "Bir daha yaz, kaçırdım.";
 }
 
 function rememberAiTurn(userKey: string, userText: string, botText: string): void {

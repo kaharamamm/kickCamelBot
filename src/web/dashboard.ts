@@ -1,6 +1,7 @@
 import { ACCESS_LEVELS, getAccess, type AccessLevel } from "../bot/access.js";
 import { extraChannelSlugs } from "../bot/channelStore.js";
 import { formatAnkaraShort } from "../bot/clock.js";
+import { lanUrls, tunnelBaseUrl } from "../bot/lan.js";
 import { BUILTIN_COMMANDS } from "../bot/commands.js";
 import { listCustomCommands } from "../bot/customCommands.js";
 import { getCommandTimer } from "../bot/commandTimers.js";
@@ -12,20 +13,28 @@ import { getSettings, type AiLength } from "../bot/settings.js";
 import { listTimedCommands } from "../bot/timedStore.js";
 import { timerPreset } from "../bot/timerPreset.js";
 import { config } from "../config.js";
+import { discordStatus } from "../discord/client.js";
+import { discordInviteUrl } from "../discord/invite.js";
+import {
+  DISCORD_IDENTITIES,
+  DISCORD_KING_ID,
+  discordKingUserId,
+} from "../discord/identities.js";
+import { getDiscordRouting } from "../discord/settings.js";
 import { liveChatChannels, liveChatStatus } from "../kick/liveChat.js";
 
-export type DashTab = "status" | "commands" | "ai" | "mod" | "memory" | "recap";
+export type DashTab = "status" | "commands" | "ai" | "mod" | "memory" | "recap" | "admin" | "discord";
 
 const PAGE_SIZE = 12;
 
-export function dashboardPage(params: {
+export async function dashboardPage(params: {
   tab: DashTab;
   authorized: boolean;
   botAccount?: string;
   notice?: string;
   noticeBad?: boolean;
   page?: number;
-}): string {
+}): Promise<string> {
   const page = Math.max(1, params.page ?? 1);
   const inner =
     params.tab === "commands"
@@ -38,7 +47,11 @@ export function dashboardPage(params: {
             ? memoryBody(page)
             : params.tab === "recap"
               ? recapBody()
-              : statusBody(params.authorized, params.botAccount);
+              : params.tab === "admin"
+                ? adminBody()
+                : params.tab === "discord"
+                  ? await discordBody()
+                  : statusBody(params.authorized, params.botAccount);
   return layout(params.tab, params.notice ?? "", inner, params.noticeBad);
 }
 
@@ -101,6 +114,18 @@ function layout(tab: DashTab, notice: string, inner: string, noticeBad = false):
   body.ai-page .ai-form textarea[name=canAnswer],
   body.ai-page .ai-form textarea[name=cannotAnswer] { flex: 0.85; min-height: 4.5rem; resize: none; }
   body.ai-page .ai-form .row { margin-top: auto; }
+  body.admin-page main { width: 100%; max-width: 72rem; align-self: center; flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; padding-bottom: 1rem; }
+  body.admin-page .admin-card { flex: 1; min-height: 0; display: flex; flex-direction: column; margin-bottom: 0; }
+  .admin-log { flex: 1; min-height: 18rem; overflow: auto; background: #0b0b0d; border: 1px solid #2c2c33; border-radius: 12px; padding: .85rem 1rem; margin-top: .6rem; }
+  .admin-line { margin: .55rem 0; white-space: pre-wrap; word-break: break-word; color: #fff; }
+  .admin-line.user strong { color: #53fc18; }
+  .admin-line.bot strong { color: #b47cff; }
+  .admin-line.error { color: #ff8a8a; font-style: normal; }
+  .admin-line.error strong { color: #ff6b6b; }
+  .admin-line.executing { color: #b8b8c0; font-style: italic; }
+  .admin-line.executing strong { color: #b47cff; opacity: .95; }
+  .admin-compose { display: flex; gap: .55rem; margin-top: .85rem; align-items: flex-end; }
+  .admin-compose input { flex: 1; }
   button, .btn { background: #53fc18; color: #041204; border: 0; border-radius: 10px; padding: .5rem .8rem; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-block; }
   .btn.ghost { background: transparent; color: #53fc18; border: 1px solid #2f6a1c; }
   .danger { background: transparent; color: #ff8a8a; border: 1px solid #5a2a2a; font-weight: 600; padding: .3rem .65rem; }
@@ -123,7 +148,15 @@ function layout(tab: DashTab, notice: string, inner: string, noticeBad = false):
   .who-worst { color: #ff6b6b; font-weight: 800; }
   .why { color: #fff; font-weight: 700; margin: .15rem 0 .75rem; }
   .said-full { margin: .35rem 0 0; color: #ececec; font-weight: 600; white-space: pre-wrap; word-break: break-word; }
-</style></head><body class="${tab === "ai" || tab === "mod" || tab === "memory" ? `tall-page${tab === "ai" ? " ai-page" : ""}` : ""}">
+  .add-row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: flex-end; margin-top: .35rem; }
+  .add-row label { display: flex; flex-direction: column; gap: .25rem; flex: 1; min-width: 9rem; font-size: 13px; color: #c8c8d0; }
+  .add-row input[type=text], .add-row select { width: 100%; }
+  .item-list { list-style: none; padding: 0; margin: .5rem 0 0; }
+  .item-list li { display: flex; gap: .55rem; align-items: center; padding: .5rem 0; border-bottom: 1px solid #2c2c33; }
+  .item-list li:last-child { border-bottom: 0; }
+  .item-list .grow { flex: 1; min-width: 0; }
+  .route-status { grid-column: 1 / -1; margin: .15rem 0; }
+</style></head><body class="${tab === "ai" || tab === "mod" || tab === "memory" || tab === "admin" ? `tall-page${tab === "ai" ? " ai-page" : tab === "admin" ? " admin-page" : ""}` : ""}">
 <header>
   <div class="bar"><h1>${config.bot.name}</h1></div>
   <nav>
@@ -133,6 +166,8 @@ function layout(tab: DashTab, notice: string, inner: string, noticeBad = false):
     <a class="${tab === "memory" ? "on" : ""}" href="/memory">Memory</a>
     <a class="${tab === "recap" ? "on" : ""}" href="/recap">Recap</a>
     <a class="${tab === "ai" ? "on" : ""}" href="/ai">AI</a>
+    <a class="${tab === "admin" ? "on" : ""}" href="/admin">Admin</a>
+    <a class="${tab === "discord" ? "on" : ""}" href="/discord">Discord</a>
   </nav>
 </header>
 <main>
@@ -163,13 +198,24 @@ function statusBody(authorized: boolean, botAccount?: string): string {
   return `
   <div class="split">
   <div class="card">
-    <h2>Status</h2>
+    <div class="card-head">
+      <h2>Status</h2>
+      <a class="btn" href="/">Refresh</a>
+    </div>
     <div class="grid">
       <p>Login: ${authorized ? '<span class="ok">authorized</span>' : '<span class="warn">not authorized</span>'}</p>
       <p>Posts as: ${botAccount ? `<span class="ok">${escapeHtml(botAccount)}</span>` : '<span class="warn">streamer account</span>'}</p>
       <p>AI: ${config.gemini.apiKey ? '<span class="ok">online</span>' : '<span class="warn">off</span>'}</p>
       <p>Live chat: ${liveChatStatus.startsWith("listening") ? `<span class="ok">${escapeHtml(liveChatStatus)}</span>` : `<span class="warn">${escapeHtml(liveChatStatus)}</span>`}</p>
+      <p>Mod /clear: <span class="warn">type /clear in Kick chat — bots can't run it server-side</span></p>
     </div>
+    <p class="muted">Chat uses Kick's live socket. Follows, subs, gifts, and title changes need the Cloudflare webhook tunnel.</p>
+    ${webhookFormula()}
+    <p class="muted">On this network: ${
+      lanUrls(config.port)
+        .map((url) => `<a href="${escapeHtml(url)}">${escapeHtml(url)}</a>`)
+        .join(" · ") || "this PC only"
+    }. The dashboard stays on this PC only. The tunnel only accepts Kick webhooks.</p>
     <form method="post" action="/settings">
       <label class="check">
         <input type="checkbox" name="engageOffline" value="1" ${settings.engageOffline ? "checked" : ""}>
@@ -230,10 +276,261 @@ function statusBody(authorized: boolean, botAccount?: string): string {
   </div>
   <div class="card">
     <h2>Chat</h2>
-    <p class="muted">Live only: joins conversation, idle lines (5–10 min quiet, stops if the last 5 messages are CamelBot), quiz, timed messages. Offline: home channel still answers if you @CamelBot, say bot/mods, or keep talking to it. Extra channels stay silent while offline except Dota commands (<code>!mmr</code> <code>!wl</code> <code>!lastgame</code> <code>!medal</code> <code>!dota</code>) which always work.</p>
+    <p class="muted">Live only: joins conversation, idle lines (5–10 min quiet, stops if the last 5 messages are CamelBot), quiz, timed messages. Offline: home channel still answers if you @CamelBot, say bot/mods, or keep talking to it. Extra channels stay silent while offline except Dota commands (<code>!mmr</code> <code>!wl</code> <code>!lastgame</code> <code>!medal</code> <code>!dota</code>) which always work. From home chat you can tell CamelBot to join a <em>registered</em> extra channel and post there, or raid/host any Kick channel (does not need to be in the list). You can also say things like <code>clear the chat</code> or <code>şarkıyı geç</code>.</p>
   </div>
   </div>
   </div>`;
+}
+
+async function discordBody(): Promise<string> {
+  const d = await discordStatus();
+  const routing = getDiscordRouting();
+  const fmt = (iso: string | null) => (iso ? formatAnkaraShort(new Date(iso)) : "—");
+
+  const routeStatusRows =
+    d.routes.length > 0
+      ? d.routes
+          .map((r) => {
+            const postSame = r.postChannelId === r.listenChannelId;
+            const listen = r.listenName ? `#${r.listenName}` : r.listenChannelId;
+            const post = postSame
+              ? "same as listen"
+              : r.postName
+                ? `#${r.postName}`
+                : r.postChannelId;
+            const guild = r.guildName ?? r.guildId;
+            return `<p class="route-status"><span class="k">Route:</span> ${escapeHtml(guild)} · listen ${escapeHtml(listen)} → post ${escapeHtml(String(post))}</p>`;
+          })
+          .join("")
+      : '<p class="route-status"><span class="warn">No routes configured</span></p>';
+
+  const knownRows = Object.entries(DISCORD_IDENTITIES)
+    .map(
+      ([id, row]) => `<tr>
+        <td><code>${escapeHtml(id)}</code></td>
+        <td><strong>${escapeHtml(row.label)}</strong>${row.isKing ? ' <span class="tag">king</span>' : ""}</td>
+        <td class="muted">${escapeHtml(row.seedSummary.slice(0, 120))}</td>
+      </tr>`,
+    )
+    .join("");
+
+  const inviteUrl = discordInviteUrl();
+  const initialRoutes = JSON.stringify(routing.routes);
+  const initialAlwaysReply = JSON.stringify(routing.alwaysReplyUsers);
+  const guildOptionsJson = JSON.stringify(d.guildOptions);
+  const channelsByGuildJson = JSON.stringify(d.channelsByGuild);
+
+  return `
+  <div class="card">
+    <div class="card-head">
+      <h2>Discord</h2>
+      <div class="row">
+        ${inviteUrl ? `<a class="btn" href="/discord/invite" target="_blank" rel="noreferrer">Invite bot to server</a>` : `<span class="warn">Set DISCORD_CLIENT_ID in .env to invite</span>`}
+        <a class="btn ghost" href="/discord">Refresh</a>
+      </div>
+    </div>
+    <div class="grid">
+      <p>Token: ${d.configured ? '<span class="ok">set in .env</span>' : '<span class="warn">DISCORD_BOT_TOKEN missing</span>'}</p>
+      <p>Connection: ${d.ready ? `<span class="ok">online${d.tag ? ` — ${escapeHtml(d.tag)}` : ""}</span>` : '<span class="warn">offline — run npm run dev</span>'}</p>
+      <p>AI replies: ${config.gemini.apiKey ? '<span class="ok">Gemini ready</span>' : '<span class="warn">GEMINI_API_KEY missing</span>'}</p>
+      <p>Routes: ${d.routes.length ? `<span class="ok">${d.routes.length} active</span>` : '<span class="warn">none</span>'}</p>
+      <p>Always reply: ${d.alwaysReplyUserIds.length ? `<span class="ok">${d.alwaysReplyUserIds.length} users</span>` : '<span class="muted">none</span>'}</p>
+      <p>Messages seen: ${d.messagesSeen} · Replies sent: ${d.repliesSent}</p>
+      <p>Last message: ${escapeHtml(fmt(d.lastMessageAt))} · Last reply: ${escapeHtml(fmt(d.lastReplyAt))}</p>
+      ${d.lastError ? `<p style="grid-column:1/-1">Last error: <span class="warn">${escapeHtml(d.lastError)}</span></p>` : ""}
+      ${routeStatusRows}
+    </div>
+    <form class="stack" id="discordForm" method="post" action="/discord/settings">
+      <input type="hidden" name="routesJson" id="routesJson">
+      <input type="hidden" name="alwaysReplyJson" id="alwaysReplyJson">
+
+      <h3>Listen / post routes</h3>
+      <p class="muted">Add one row per server: bot reads in the listen channel and posts replies in the post channel (or the same channel). Saved to <code>data/discord.json</code>.</p>
+      <div class="add-row" id="routeAddRow">
+        <label>Server
+          <select id="routeGuildPick"><option value="">— pick server —</option></select>
+        </label>
+        <label>Listen channel
+          <select id="routeListenPick"><option value="">— pick channel —</option></select>
+        </label>
+        <label>Post channel
+          <select id="routePostPick"><option value="">Same as listen</option></select>
+        </label>
+        <button type="button" class="btn" id="routeAddBtn">Add route</button>
+      </div>
+      <div class="add-row">
+        <label>Or server ID
+          <input type="text" id="routeGuildManual" placeholder="145547351451369472">
+        </label>
+        <label>Or listen ID
+          <input type="text" id="routeListenManual" placeholder="453591795620904980">
+        </label>
+        <label>Or post ID
+          <input type="text" id="routePostManual" placeholder="leave empty = same">
+        </label>
+      </div>
+      <ul class="item-list" id="routeList"></ul>
+
+      <h3>Always reply users</h3>
+      <p class="muted">These users get a reply even without @mentioning the bot. Nickname is optional if they are in Known people.</p>
+      <div class="add-row">
+        <label>Discord user ID
+          <input type="text" id="alwaysIdInput" placeholder="231086890017751040">
+        </label>
+        <label>Nickname <span class="muted">(optional)</span>
+          <input type="text" id="alwaysLabelInput" placeholder="mcvckaharamamm">
+        </label>
+        <button type="button" class="btn" id="alwaysAddBtn">Add user</button>
+      </div>
+      <ul class="item-list" id="alwaysList"></ul>
+
+      <h3>Known people</h3>
+      <table class="facts" style="width:100%;margin:.5rem 0 1rem">
+        <tr><th>Discord ID</th><th>Name</th><th>Notes</th></tr>
+        ${knownRows}
+      </table>
+      <p>King (static): <code>${escapeHtml(discordKingUserId())}</code> — <strong>mcvckaharamamm</strong> <span class="muted">(${escapeHtml(DISCORD_KING_ID)})</span></p>
+      <div class="row">
+        <button type="submit">Save &amp; reconnect</button>
+      </div>
+    </form>
+    <p class="muted">Bot needs <strong>View Channel</strong>, <strong>Send Messages</strong>, and <strong>Read Message History</strong> in both listen and post channels (when they differ).</p>
+    <p class="muted">Use <strong>Invite bot to server</strong> to add AmqKeliBot to another Discord server, then refresh this page and pick that server from the dropdown.</p>
+  </div>
+  <script>
+  (() => {
+    const guildOptions = ${guildOptionsJson};
+    const channelsByGuild = ${channelsByGuildJson};
+    let routes = ${initialRoutes};
+    let alwaysReply = ${initialAlwaysReply};
+
+    const routeList = document.getElementById("routeList");
+    const alwaysList = document.getElementById("alwaysList");
+    const routesJson = document.getElementById("routesJson");
+    const alwaysReplyJson = document.getElementById("alwaysReplyJson");
+    const guildPick = document.getElementById("routeGuildPick");
+    const listenPick = document.getElementById("routeListenPick");
+    const postPick = document.getElementById("routePostPick");
+    const guildManual = document.getElementById("routeGuildManual");
+    const listenManual = document.getElementById("routeListenManual");
+    const postManual = document.getElementById("routePostManual");
+    const alwaysIdInput = document.getElementById("alwaysIdInput");
+    const alwaysLabelInput = document.getElementById("alwaysLabelInput");
+    const form = document.getElementById("discordForm");
+
+    function guildName(id) {
+      return guildOptions.find((g) => g.id === id)?.name ?? id;
+    }
+
+    function channelName(guildId, channelId) {
+      const rows = channelsByGuild[guildId] ?? [];
+      return rows.find((c) => c.id === channelId)?.name ?? channelId;
+    }
+
+    function fillGuildSelect() {
+      guildPick.innerHTML = '<option value="">— pick server —</option>' +
+        guildOptions.map((g) => '<option value="' + g.id + '">' + g.name + ' (' + g.id + ')</option>').join("");
+    }
+
+    function fillChannelSelects(guildId) {
+      const rows = channelsByGuild[guildId] ?? [];
+      const opts = rows.map((c) => '<option value="' + c.id + '">' + c.name + ' (' + c.id + ')</option>').join("");
+      listenPick.innerHTML = '<option value="">— pick channel —</option>' + opts;
+      postPick.innerHTML = '<option value="">Same as listen</option>' + opts;
+    }
+
+    function renderRoutes() {
+      if (!routes.length) {
+        routeList.innerHTML = '<li class="muted">No routes yet — add one above.</li>';
+        return;
+      }
+      routeList.innerHTML = routes.map((r, i) => {
+        const postId = r.postChannelId || r.listenChannelId;
+        const postLabel = postId === r.listenChannelId
+          ? "same as listen"
+          : channelName(r.guildId, postId);
+        return '<li><span class="grow"><strong>' + guildName(r.guildId) + '</strong> · listen ' +
+          channelName(r.guildId, r.listenChannelId) + ' → post ' + postLabel + '</span>' +
+          '<button type="button" class="danger" data-route="' + i + '">Remove</button></li>';
+      }).join("");
+      routeList.querySelectorAll("[data-route]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          routes.splice(Number(btn.getAttribute("data-route")), 1);
+          renderRoutes();
+        });
+      });
+    }
+
+    function renderAlwaysReply() {
+      if (!alwaysReply.length) {
+        alwaysList.innerHTML = '<li class="muted">No users yet — add one above.</li>';
+        return;
+      }
+      alwaysList.innerHTML = alwaysReply.map((u, i) => {
+        const name = u.label || u.id;
+        return '<li><span class="grow"><code>' + u.id + '</code> · <strong>' + name + '</strong></span>' +
+          '<button type="button" class="danger" data-always="' + i + '">Remove</button></li>';
+      }).join("");
+      alwaysList.querySelectorAll("[data-always]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          alwaysReply.splice(Number(btn.getAttribute("data-always")), 1);
+          renderAlwaysReply();
+        });
+      });
+    }
+
+    guildPick.addEventListener("change", () => fillChannelSelects(guildPick.value));
+
+    document.getElementById("routeAddBtn").addEventListener("click", () => {
+      const guildId = guildPick.value || guildManual.value.trim();
+      const listenChannelId = listenPick.value || listenManual.value.trim();
+      const postChannelId = postPick.value || postManual.value.trim();
+      if (!guildId || !listenChannelId) {
+        alert("Pick or paste a server ID and listen channel ID.");
+        return;
+      }
+      const dup = routes.some((r) => r.guildId === guildId && r.listenChannelId === listenChannelId);
+      if (dup) {
+        alert("That listen channel is already in the list.");
+        return;
+      }
+      routes.push({ guildId, listenChannelId, postChannelId });
+      guildManual.value = "";
+      listenManual.value = "";
+      postManual.value = "";
+      renderRoutes();
+    });
+
+    document.getElementById("alwaysAddBtn").addEventListener("click", () => {
+      const id = alwaysIdInput.value.trim();
+      const label = alwaysLabelInput.value.trim();
+      if (!/^\\d{15,22}$/.test(id)) {
+        alert("Enter a valid Discord user ID (15–22 digits).");
+        return;
+      }
+      if (alwaysReply.some((u) => u.id === id)) {
+        alert("That user is already in the list.");
+        return;
+      }
+      alwaysReply.push({ id, label });
+      alwaysIdInput.value = "";
+      alwaysLabelInput.value = "";
+      renderAlwaysReply();
+    });
+
+    form.addEventListener("submit", () => {
+      routesJson.value = JSON.stringify(routes);
+      alwaysReplyJson.value = JSON.stringify(alwaysReply);
+    });
+
+    fillGuildSelect();
+    const presetGuild = routes[0]?.guildId || guildOptions[0]?.id || "";
+    if (presetGuild) guildPick.value = presetGuild;
+    fillChannelSelects(guildPick.value);
+    renderRoutes();
+    renderAlwaysReply();
+  })();
+  </script>`;
 }
 
 function commandsBody(): string {
@@ -539,6 +836,140 @@ function looksBadNotice(text: string): boolean {
   return /\b(no |not |could not|couldn't|cannot|can't|failed|error|empty|too long|already |is a built-in|cannot be removed|does not exist|named "|pick |use letters)/i.test(
     text,
   );
+}
+
+function adminBody(): string {
+  const bot = config.bot.name;
+  return `<div class="card admin-card">
+    <div class="card-head">
+      <h2>Admin chat</h2>
+      <div class="row" style="margin:0">
+        <a class="btn" href="/admin">Refresh</a>
+        <button type="button" class="btn danger" id="admin-clear">Clear chat</button>
+      </div>
+    </div>
+    <p class="muted">Talk to ${escapeHtml(bot)} like your Kick chat. Orders run for real (clear, remote say, skip, raid, title, etc.). Uses AI to understand Turkish/English slang. LAN-only.</p>
+    <div id="admin-log" class="admin-log" aria-live="polite"></div>
+    <form id="admin-form" class="admin-compose">
+      <input type="text" id="admin-input" name="message" autocomplete="off" placeholder="Order your CamelBot" maxlength="400" />
+      <button type="submit">Send</button>
+    </form>
+  </div>
+  <script>
+  (function(){
+    const log = document.getElementById("admin-log");
+    const form = document.getElementById("admin-form");
+    const input = document.getElementById("admin-input");
+    const clearBtn = document.getElementById("admin-clear");
+    const botName = ${JSON.stringify(bot)};
+    let lines = [];
+    let execDots = 1;
+    let execTimer = null;
+    function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+    function lineText(l){
+      if(l.executing) return "Executing" + ".".repeat(execDots);
+      return l.text;
+    }
+    function render(){
+      log.innerHTML = lines.map(l => {
+        const who = l.role === "user" ? "The Camel King" : l.role === "bot" ? botName : "System";
+        const cls = l.role + (l.executing ? " executing" : "") + (l.error ? " error" : "");
+        return '<div class="admin-line ' + cls + '"><strong>' + esc(who) + ':</strong> ' + esc(lineText(l)) + '</div>';
+      }).join("");
+      log.scrollTop = log.scrollHeight;
+    }
+    function setLines(next){
+      lines = Array.isArray(next) ? next : [];
+      render();
+    }
+    function startExecuting(){
+      stopExecuting();
+      execDots = 1;
+      execTimer = setInterval(() => {
+        execDots = execDots >= 3 ? 1 : execDots + 1;
+        render();
+      }, 450);
+    }
+    function stopExecuting(){
+      if(execTimer){ clearInterval(execTimer); execTimer = null; }
+    }
+    async function refresh(){
+      try {
+        const res = await fetch("/admin/chat");
+        if(!res.ok) return;
+        const data = await res.json();
+        if(Array.isArray(data)) setLines(data);
+        else if(Array.isArray(data.lines)) setLines(data.lines);
+      } catch (_) {}
+    }
+    clearBtn.addEventListener("click", async () => {
+      stopExecuting();
+      try {
+        const res = await fetch("/admin/chat", { method: "DELETE" });
+        if(!res.ok) return;
+        const data = await res.json();
+        setLines(Array.isArray(data.lines) ? data.lines : []);
+      } catch (_) {}
+      input.focus();
+    });
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const message = input.value.trim();
+      if(!message) return;
+      input.value = "";
+      const now = Date.now();
+      lines = lines.filter(l => !l.executing);
+      lines.push({ role: "user", text: message, id: "local-u-" + now });
+      lines.push({ role: "bot", text: "Executing.", executing: true, id: "local-exec-" + now });
+      render();
+      startExecuting();
+      input.disabled = true;
+      try {
+        const res = await fetch("/admin/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message })
+        });
+        const raw = await res.text();
+        let data;
+        try { data = JSON.parse(raw); } catch {
+          stopExecuting();
+          lines = lines.filter(l => !l.executing);
+          lines.push({ role: "system", text: "Server error (" + res.status + "). Reload the bot and try again.", error: true });
+          render();
+          return;
+        }
+        stopExecuting();
+        if(Array.isArray(data.lines)) setLines(data.lines);
+        else if(Array.isArray(data)) setLines(data);
+        else if(data.error){
+          lines = lines.filter(l => !l.executing);
+          lines.push({ role: "system", text: data.error, error: true });
+          render();
+        }
+      } catch(err) {
+        stopExecuting();
+        lines = lines.filter(l => !l.executing);
+        lines.push({ role: "system", text: "Request failed. Is the bot running?", error: true });
+        render();
+      } finally {
+        input.disabled = false;
+        input.focus();
+      }
+    });
+    refresh();
+    input.focus();
+  })();
+  </script>`;
+}
+
+function webhookFormula(): string {
+  const base = tunnelBaseUrl();
+  const hook = `${base ?? "https://YOUR-TUNNEL.trycloudflare.com"}${config.kick.webhookPath}`;
+  const status = base
+    ? `<span class="ok">tunnel live</span>. Kick Developer webhook URL:<br><code>${escapeHtml(hook)}</code>`
+    : `Tunnel is off. Run <code>powershell -File scripts\\start-webhook-tunnel.ps1</code>, then paste the printed URL + <code>${escapeHtml(config.kick.webhookPath)}</code> into Kick.`;
+  return `<p class="muted"><strong>Webhook formula:</strong> Kick events (follow, sub, gift, title) → Cloudflare tunnel → this PC. ${status}</p>`;
 }
 
 function escapeHtml(value: string): string {

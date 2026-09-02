@@ -18,6 +18,7 @@ export class ChannelNotFoundError extends Error {
 export type PublicChannel = {
   slug: string;
   userId: number;
+  channelId: number;
   chatroomId: number;
   title: string;
   game: string;
@@ -26,6 +27,7 @@ export type PublicChannel = {
 };
 
 type KickV2 = {
+  id?: number;
   user_id?: number;
   livestream?: {
     session_title?: string;
@@ -60,8 +62,9 @@ export async function lookupPublicChannel(slug: string): Promise<PublicChannel> 
   if (!v2 && official) throw new Error(`Kick has ${key}, but CamelBot could not read its chatroom`);
 
   const userId = v2?.user_id ?? official?.broadcaster_user_id;
+  const channelId = v2?.id;
   const chatroomId = v2?.chatroom?.id;
-  if (!userId || !chatroomId) {
+  if (!userId || !chatroomId || !channelId) {
     if (official) throw new Error(`Kick has ${key}, but CamelBot could not read its chatroom`);
     throw new ChannelNotFoundError(key);
   }
@@ -69,6 +72,7 @@ export async function lookupPublicChannel(slug: string): Promise<PublicChannel> 
   const data: PublicChannel = {
     slug: key,
     userId,
+    channelId,
     chatroomId,
     title:
       official?.stream_title ||

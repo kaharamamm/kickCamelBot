@@ -496,8 +496,10 @@ async function handleSubOnly(args: string): Promise<string> {
 }
 
 async function handleClear(): Promise<string> {
-  const ok = await clearChat();
-  return ok ? "Chat cleared." : "Couldn't clear chat.";
+  const result = await clearChat();
+  return result.ok
+    ? "Chat cleared."
+    : "Kick won't run /clear from a bot — type /clear in chat or use the Kick dashboard.";
 }
 
 async function handleClip(args: string): Promise<string> {

@@ -141,6 +141,23 @@ export function personNote(userId: number): string {
     .join(" · ");
 }
 
+/** Pre-load lore for known Discord/Kick identities (does not overwrite a longer learned summary). */
+export function seedPersonMemory(userId: number, username: string, summary: string, nick?: string): void {
+  if (!userId) return;
+  hydrate();
+  const existing = people.get(userId);
+  const seed = summary.replace(/\s+/g, " ").trim().slice(0, 240);
+  people.set(userId, {
+    username,
+    nick: nick ?? existing?.nick ?? username,
+    bio: existing?.bio,
+    summary: existing?.summary && existing.summary.length >= seed.length ? existing.summary : seed,
+    lastAt: Date.now(),
+    lastSummaryAt: existing?.lastSummaryAt ?? 0,
+  });
+  persist();
+}
+
 export function rememberPerson(actor: KickActor, lastText?: string): void {
   if (!actor.user_id) return;
   hydrate();

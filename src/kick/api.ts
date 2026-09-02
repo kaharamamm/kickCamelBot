@@ -1,6 +1,10 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { config } from "../config.js";
 import { refreshAccessToken } from "../auth/oauth.js";
 import { loadBotTokens, loadTokens, saveBotTokens, saveTokens } from "../auth/tokenStore.js";
+import { hasSiteSession, loadSiteSession, parseXsrfToken } from "../auth/siteSession.js";
+import { lookupPublicChannel } from "./publicChannel.js";
 import type {
   ChannelReward,
   KickChannel,
@@ -131,36 +135,138 @@ export async function searchCategories(query: string): Promise<Array<{ id: numbe
   return parseCategories(v2json.data);
 }
 
-/** Slash commands as a user with mod/owner rights (bot account if logged in, else streamer). */
-export async function sendChatCommand(content: string): Promise<boolean> {
-  const channel = await getMyChannel();
-  const payload = {
-    content,
-    type: "user",
-    broadcaster_user_id: channel.broadcaster_user_id,
+export type ModSlashResult = { ok: true } | { ok: false; reason: string };
+
+const execFileAsync = promisify(execFile);
+
+const SITE_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+async function kickCurlRequest(
+  url: string,
+  slug: string,
+  init: { method?: string; headers?: Record<string, string>; body?: string },
+): Promise<{ status: number; body: string }> {
+  const method = init.method ?? "GET";
+  const args = ["-sS", "-L", "-A", SITE_UA, "-X", method];
+  const headers = {
+    Accept: "application/json",
+    Origin: "https://kick.com",
+    Referer: `https://kick.com/${slug}`,
+    ...init.headers,
   };
-  const bot = await getValidBotTokens();
-  if (bot) {
-    const res = await fetch(`${config.kick.apiBase}/chat`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${bot.accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-    if (res.ok) return true;
-    console.warn("[chat-cmd] bot", content, res.status, (await res.text()).slice(0, 180));
+  for (const [key, value] of Object.entries(headers)) {
+    args.push("-H", `${key}: ${value}`);
   }
-  const res = await authorizedFetch("/chat", {
+  if (init.body) args.push("-d", init.body);
+  args.push("-w", "\n__STATUS__%{http_code}", url);
+  try {
+    const { stdout } = await execFileAsync("curl", args, { timeout: 20_000, maxBuffer: 2_000_000 });
+    const idx = stdout.lastIndexOf("\n__STATUS__");
+    if (idx < 0) return { status: 0, body: stdout };
+    const body = stdout.slice(0, idx);
+    const status = Number(stdout.slice(idx + "\n__STATUS__".length));
+    return { status: Number.isFinite(status) ? status : 0, body };
+  } catch {
+    return { status: 0, body: "" };
+  }
+}
+
+async function kickSiteSessionPost(
+  url: string,
+  slug: string,
+  cookie: string,
+  xsrf: string,
+  payload: object,
+): Promise<{ status: number; body: string }> {
+  const body = JSON.stringify(payload);
+  const xsrfRaw = cookie.match(/(?:^|;\s*)XSRF-TOKEN=([^;]+)/i)?.[1] ?? xsrf;
+
+  for (const token of [xsrf, xsrfRaw]) {
+    const headers = {
+      Cookie: cookie,
+      "X-XSRF-TOKEN": token,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "X-Requested-With": "XMLHttpRequest",
+    };
+    const viaCurl = await kickCurlRequest(url, slug, { method: "POST", headers, body });
+    if (viaCurl.status >= 200 && viaCurl.status < 300) return viaCurl;
+    if (viaCurl.status === 401 || viaCurl.status === 403) continue;
+
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { ...headers, Origin: "https://kick.com", Referer: `https://kick.com/${slug}`, "User-Agent": SITE_UA },
+        body,
+      });
+      const raw = await res.text();
+      if (res.ok) return { status: res.status, body: raw };
+      if (res.status !== 401 && res.status !== 403) return { status: res.status, body: raw };
+    } catch {
+      /* try next xsrf form */
+    }
+  }
+
+  return kickCurlRequest(url, slug, {
     method: "POST",
-    body: JSON.stringify(payload),
+    headers: {
+      Cookie: cookie,
+      "X-XSRF-TOKEN": xsrf,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "X-Requested-With": "XMLHttpRequest",
+    },
+    body,
   });
-  if (!res.ok) {
-    console.warn("[chat-cmd]", content, res.status, (await res.text()).slice(0, 180));
-    return false;
+}
+
+/** Run a Kick mod slash command (/clear, /slow, …) via kick.com site session — OAuth cannot do this. */
+export async function sendChatCommand(content: string): Promise<ModSlashResult> {
+  const cmd = content.trim();
+  if (!cmd.startsWith("/")) return { ok: false, reason: "not_a_slash_command" };
+
+  const channel = await getMyChannel();
+  const slug = channel.slug.toLowerCase();
+
+  if (!hasSiteSession()) {
+    return { ok: false, reason: "site_session_required" };
   }
-  return true;
+
+  const session = loadSiteSession();
+  const xsrf = session ? parseXsrfToken(session.cookie) : undefined;
+  if (!session?.cookie || !xsrf) {
+    return { ok: false, reason: "site_session_invalid" };
+  }
+
+  const parts = cmd.replace(/^\//, "").split(/\s+/);
+  const name = parts[0] ?? "";
+  const parameter = parts.length > 1 ? parts.slice(1).join(" ") : null;
+
+  const cmdUrl = `https://kick.com/api/v2/channels/${encodeURIComponent(slug)}/chat-commands`;
+  const { status, body: raw } = await kickSiteSessionPost(cmdUrl, slug, session.cookie, xsrf, {
+    command: name,
+    parameter,
+  });
+
+  if (status >= 200 && status < 300) {
+    try {
+      const json = JSON.parse(raw) as { success?: boolean; message?: string };
+      if (json.success === true) return { ok: true };
+      if (json.success === false) {
+        return { ok: false, reason: json.message?.trim() || "chat_command_rejected" };
+      }
+    } catch {
+      /* non-json 2xx — treat as ok */
+    }
+    return { ok: true };
+  }
+
+  const lastReason = status ? `site_api_${status}` : "site_api_network_error";
+  if (status !== 404 && status !== 422) {
+    console.warn("[chat-cmd] site session", cmd, status, raw.slice(0, 180));
+  }
+  return { ok: false, reason: lastReason };
 }
 
 export async function getValidBotTokens(): Promise<TokenSet | null> {
@@ -184,7 +290,8 @@ export async function sendChat(
   const streamer = await getValidTokens();
   const bot = await getValidBotTokens();
   const homeId = channel.broadcaster_user_id ?? streamer.user?.user_id;
-  const targetId = targetBroadcasterUserId ?? homeId;
+  const targetId =
+    targetBroadcasterUserId && targetBroadcasterUserId > 0 ? targetBroadcasterUserId : homeId;
   const crossChannel = Boolean(targetId && homeId && targetId !== homeId);
 
   const payload: Record<string, unknown> = {
@@ -299,6 +406,90 @@ export async function deleteChatMessage(messageId: string): Promise<void> {
   } catch (err) {
     console.warn("[mod] delete failed", err);
   }
+}
+
+async function kickSiteToken(): Promise<string | null> {
+  const tokens = await kickSiteTokens();
+  return tokens[0] ?? null;
+}
+
+async function kickSiteTokens(): Promise<string[]> {
+  const out: string[] = [];
+  try {
+    out.push((await getValidTokens()).accessToken);
+  } catch {
+    /* streamer not logged in */
+  }
+  const bot = await getValidBotTokens();
+  if (bot?.accessToken) out.push(bot.accessToken);
+  return out;
+}
+
+/** Pin a chat message (uses Kick site API — needs mod/broadcaster token). */
+export async function pinChatMessage(messageId: string, channelSlug?: string): Promise<boolean> {
+  if (!messageId) return false;
+  const channel = await getMyChannel();
+  const slug = (channelSlug || channel.slug).toLowerCase();
+  const token = await kickSiteToken();
+  if (!token) return false;
+
+  const urls = [
+    `https://kick.com/api/v2/channels/${encodeURIComponent(slug)}/pinned-message`,
+    `https://kick.com/api/internal/v1/channels/${encodeURIComponent(slug)}/chatroom/pinned-message`,
+  ];
+  const bodies: Record<string, unknown>[] = [
+    { message_id: messageId },
+    { chat_message_id: messageId },
+    { id: messageId },
+  ];
+
+  for (const url of urls) {
+    for (const body of bodies) {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify(body),
+        });
+        if (res.ok) return true;
+        if (res.status !== 404 && res.status !== 422) {
+          console.warn("[pin]", url, res.status, (await res.text()).slice(0, 160));
+        }
+      } catch (err) {
+        console.warn("[pin] request failed", url, err);
+      }
+    }
+  }
+  return sendChatCommand(`/pin ${messageId}`).then((r) => r.ok);
+}
+
+export async function unpinChatMessage(channelSlug?: string): Promise<boolean> {
+  const channel = await getMyChannel();
+  const slug = (channelSlug || channel.slug).toLowerCase();
+  const token = await kickSiteToken();
+  if (!token) return false;
+
+  const urls = [
+    `https://kick.com/api/v2/channels/${encodeURIComponent(slug)}/pinned-message`,
+    `https://kick.com/api/internal/v1/channels/${encodeURIComponent(slug)}/chatroom/pinned-message`,
+  ];
+
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      });
+      if (res.ok || res.status === 204) return true;
+    } catch (err) {
+      console.warn("[unpin] failed", url, err);
+    }
+  }
+  return sendChatCommand("/unpin").then((r) => r.ok);
 }
 
 /** Timeout in minutes, or omit duration / pass null for a permanent ban. */

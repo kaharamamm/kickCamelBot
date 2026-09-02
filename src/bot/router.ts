@@ -23,6 +23,8 @@ import { fillTicket, skipTicket, say, takeTicket, wasBotMessage, wasBotText } fr
 import { tryAnswerQuiz } from "./quiz.js";
 import { thanksOnce } from "./thanks.js";
 import { markChat, takeVerifiedFirst } from "./viewers.js";
+import { mightBeKingOrder, runKingOrder } from "./kingOrder.js";
+import { allowWebSearch, answerWebSearch, classifyWebSearch } from "./webSearch.js";
 import { yenimahalleWeather } from "./weather.js";
 import type { ChatMessageEvent, IncomingChat, KickUser } from "../types.js";
 
@@ -179,6 +181,28 @@ export async function handleChatMessage(event: ChatMessageEvent): Promise<void> 
       return;
     }
 
+    if (fromKing) {
+      if (mightBeKingOrder(incoming.content)) {
+        const result = await runKingOrder(incoming.content, lang, incoming.broadcaster.user_id);
+        if (result !== undefined) {
+          if (result) deliver(Promise.resolve(result));
+          return;
+        }
+      }
+      if (addressed) {
+        const self = selfAskReply(incoming.content, lang);
+        if (self) {
+          deliver(Promise.resolve(self));
+          return;
+        }
+      }
+      const kingSearch = classifyWebSearch(incoming.content);
+      if (kingSearch) {
+        deliver(answerWebSearch(kingSearch, lang, incoming.content));
+        return;
+      }
+    }
+
     let heatWarn = false;
     if (
       addressed &&
@@ -213,6 +237,14 @@ export async function handleChatMessage(event: ChatMessageEvent): Promise<void> 
     }
 
     if (!addressed) return;
+
+    if (!fromKing) {
+      const search = classifyWebSearch(incoming.content);
+      if (search && allowWebSearch(incoming.sender.user_id, false)) {
+        deliver(answerWebSearch(search, lang, incoming.content));
+        return;
+      }
+    }
 
     const recapKind = classifyRecapAsk(incoming.content);
     if (recapKind) {
@@ -399,6 +431,19 @@ function stripEmotes(content: string): string {
   return content.replace(/\[emote:\d+:[^\]]+\]/g, "").replace(/\s+/g, " ").trim();
 }
 
+function selfAskReply(content: string, lang: "tr" | "en" | "other"): string | null {
+  const t = content.toLowerCase();
+  if (/ben kimim|kimim ben|who am i/i.test(t)) {
+    return lang === "en"
+      ? "You're mcvckaharamamm. This is your chat."
+      : "Sen mcvckaharamamm'sin. Burası senin sohbetin.";
+  }
+  if (/öldün( mü| mu)?|oldun mu|orada m[ıi]s[ıi]n|you (there|dead|alive)|still (there|alive)/i.test(t)) {
+    return lang === "en" ? "Yeah, I'm here." : "Buradayım.";
+  }
+  return null;
+}
+
 function isReplyToUs(chat: IncomingChat): boolean {
   if (chat.replyToId && wasBotMessage(chat.replyToId)) return true;
   if (isOwnBotName(chat.replyToName)) return true;
@@ -415,7 +460,11 @@ function alreadyHandledChat(chat: IncomingChat): boolean {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 160);
-  const keys = [chat.messageId ? `id:${chat.messageId}` : "", who && norm ? `txt:${who}:${norm}` : ""].filter(Boolean);
+  const keys = [
+    chat.messageId ? `id:${chat.messageId}` : "",
+    chat.sender.user_id && norm ? `uid:${chat.sender.user_id}:${norm}` : "",
+    who && norm ? `txt:${who}:${norm}` : "",
+  ].filter(Boolean);
   if (keys.some((k) => handledChat.has(k))) return true;
   for (const key of keys) {
     handledChat.add(key);

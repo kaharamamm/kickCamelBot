@@ -18,7 +18,12 @@ import {
 } from "./bot/router.js";
 import { getMyChannel, subscribeToEvents } from "./kick/api.js";
 import { ChannelNotFoundError, lookupPublicChannel } from "./kick/publicChannel.js";
-import { liveChatChannels, liveChatListening, liveChatStatus, startLiveChat } from "./kick/liveChat.js";
+import { liveChatArmed, liveChatChannels, liveChatListening, liveChatStatus, startLiveChat } from "./kick/liveChat.js";
+import { adminChatHistory, clearAdminChat, processAdminChat } from "./bot/adminChat.js";
+import { applyDiscordRouting, discordStatus, startDiscord } from "./discord/client.js";
+import { discordInviteUrl } from "./discord/invite.js";
+import { parseAlwaysReplyJson, parseRoutesJson, type DiscordRouting } from "./discord/settings.js";
+import { isPrivateDashboardHost } from "./bot/lan.js";
 import { setCommandTimer } from "./bot/commandTimers.js";
 import { RESERVED_COMMANDS } from "./bot/commands.js";
 import { parseDotaAccount } from "./bot/dota.js";
@@ -28,7 +33,7 @@ import { addTimedCommand, removeTimedCommand, updateTimedMinutes } from "./bot/t
 import { parseTimerMinutes } from "./bot/timerPreset.js";
 import { dashboardPage, type DashTab } from "./web/dashboard.js";
 import { removeModLog } from "./bot/modlog.js";
-import { resetStreamStats } from "./bot/recap.js";
+import { resetStreamStats, noteStreamContext } from "./bot/recap.js";
 import { isDuplicateEvent, refreshKickPublicKey, verifyKickSignature } from "./kick/webhooks.js";
 import type { ChatMessageEvent } from "./types.js";
 
@@ -50,19 +55,38 @@ function noteWebhook(entry: WebhookLog): void {
 export function createServer() {
   const app = express();
 
+  app.use((req, res, next) => {
+    if (isPrivateDashboardHost(req.hostname)) {
+      next();
+      return;
+    }
+    const path = req.path;
+    if (path === config.kick.webhookPath || path.startsWith(`${config.kick.webhookPath}/`)) {
+      next();
+      return;
+    }
+    res.status(404).end();
+  });
+
   app.get("/health", (_req, res) => {
-    const tokens = loadTokens();
-    const bot = loadBotTokens();
-    res.json({
-      ok: true,
-      bot: config.bot.name,
-      authorized: Boolean(tokens?.accessToken),
-      botAccount: bot?.user?.name ?? null,
-      ai: Boolean(config.gemini.apiKey),
-      lastWebhook: webhookLog[0] ?? null,
-      webhookHits: webhookLog.length,
-      liveChat: liveChatStatus,
-      channels: liveChatChannels,
+    void (async () => {
+      const tokens = loadTokens();
+      const bot = loadBotTokens();
+      res.json({
+        ok: true,
+        bot: config.bot.name,
+        authorized: Boolean(tokens?.accessToken),
+        botAccount: bot?.user?.name ?? null,
+        ai: Boolean(config.gemini.apiKey),
+        lastWebhook: webhookLog[0] ?? null,
+        webhookHits: webhookLog.length,
+        liveChat: liveChatStatus,
+        channels: liveChatChannels,
+        discord: await discordStatus(),
+      });
+    })().catch((err) => {
+      console.error("[health]", err);
+      res.status(500).json({ ok: false });
     });
   });
 
@@ -94,6 +118,64 @@ export function createServer() {
   app.get("/memory", (req, res) => sendDash(req, res, "memory"));
   app.get("/recap", (req, res) => sendDash(req, res, "recap"));
   app.get("/ai", (req, res) => sendDash(req, res, "ai"));
+  app.get("/admin", (req, res) => sendDash(req, res, "admin"));
+  app.get("/discord", (req, res) => sendDash(req, res, "discord"));
+
+  app.get("/discord/invite", (_req, res) => {
+    const url = discordInviteUrl();
+    if (!url) {
+      res.redirect(
+        `/discord?error=${encodeURIComponent("Set DISCORD_CLIENT_ID in .env (Developer Portal → OAuth2 → Client ID).")}`,
+      );
+      return;
+    }
+    res.redirect(url);
+  });
+
+  app.post("/discord/settings", express.urlencoded({ extended: false }), (req, res) => {
+    void (async () => {
+      const routes = parseRoutesJson(String(req.body.routesJson ?? ""));
+      const alwaysReplyUsers = parseAlwaysReplyJson(String(req.body.alwaysReplyJson ?? ""));
+      if (!routes.length) {
+        res.redirect(`/discord?error=${encodeURIComponent("Add at least one server listen/post route.")}`);
+        return;
+      }
+      try {
+        const next: DiscordRouting = { routes, alwaysReplyUsers };
+        await applyDiscordRouting(next);
+        res.redirect(`/discord?notice=${encodeURIComponent("Discord settings saved and bot reconnected.")}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Could not reconnect Discord.";
+        res.redirect(`/discord?error=${encodeURIComponent(msg)}`);
+      }
+    })();
+  });
+
+  app.get("/admin/chat", (_req, res) => {
+    res.type("json").json(adminChatHistory());
+  });
+
+  app.delete("/admin/chat", (_req, res) => {
+    res.json({ ok: true, lines: clearAdminChat() });
+  });
+
+  app.post("/admin/chat", express.json({ limit: "8kb" }), (req, res) => {
+    void (async () => {
+      try {
+        const message = String(req.body?.message ?? "").trim();
+        if (!message) {
+          res.status(400).json({ error: "Empty message.", lines: adminChatHistory() });
+          return;
+        }
+        await processAdminChat(message);
+        res.json({ ok: true, lines: adminChatHistory() });
+      } catch (err) {
+        console.warn("[admin-chat] route", err);
+        const msg = err instanceof Error ? err.message : "Admin chat failed.";
+        res.status(500).json({ error: msg, lines: adminChatHistory() });
+      }
+    })();
+  });
 
   app.post("/channels", express.urlencoded({ extended: false }), (req, res) => {
     void (async () => {
@@ -380,7 +462,7 @@ async function dispatchEvent(eventType: string, rawBody: string): Promise<void> 
   const payload = JSON.parse(rawBody) as Record<string, unknown>;
   switch (eventType) {
     case "chat.message.sent":
-      if (liveChatListening()) return;
+      if (liveChatArmed || liveChatListening()) return;
       await handleChatMessage(payload as ChatMessageEvent);
       return;
     case "channel.followed": {
@@ -447,6 +529,16 @@ async function dispatchEvent(eventType: string, rawBody: string): Promise<void> 
       });
       return;
     }
+    case "livestream.metadata.updated": {
+      const meta = payload as {
+        metadata?: { title?: string; category?: { name?: string } };
+        title?: string;
+        category?: { name?: string };
+      };
+      const game = meta.metadata?.category?.name || meta.category?.name;
+      if (game) noteStreamContext(game, undefined, true);
+      return;
+    }
     default:
       return;
   }
@@ -464,6 +556,11 @@ async function getMeWithRetry(accessToken: string): Promise<{ user_id: number; n
 
 export async function bootIntegrations(): Promise<void> {
   await refreshKickPublicKey();
+  try {
+    await startDiscord();
+  } catch (err) {
+    console.warn("[discord] failed to start", err);
+  }
   if (loadTokens()) {
     await rememberBotIdentity();
     try {
@@ -480,25 +577,30 @@ export async function bootIntegrations(): Promise<void> {
 }
 
 function sendDash(req: express.Request, res: express.Response, tab: DashTab): void {
-  const tokens = loadTokens();
-  const bot = loadBotTokens();
-  const error = stringQuery(req.query.error);
-  const notice =
-    error ||
-    stringQuery(req.query.notice) ||
-    (req.query.sent ? "Test message sent" : "") ||
-    (req.query.ok ? "Streamer account authorized" : "") ||
-    (req.query.bot ? "Bot account linked" : "");
-  res.type("html").send(
-    dashboardPage({
-      tab,
-      authorized: Boolean(tokens?.accessToken),
-      botAccount: bot?.user?.name,
-      notice,
-      noticeBad: Boolean(error),
-      page: Math.max(1, Number(req.query.p) || 1),
-    }),
-  );
+  void (async () => {
+    const tokens = loadTokens();
+    const bot = loadBotTokens();
+    const error = stringQuery(req.query.error);
+    const notice =
+      error ||
+      stringQuery(req.query.notice) ||
+      (req.query.sent ? "Test message sent" : "") ||
+      (req.query.ok ? "Streamer account authorized" : "") ||
+      (req.query.bot ? "Bot account linked" : "");
+    res.type("html").send(
+      await dashboardPage({
+        tab,
+        authorized: Boolean(tokens?.accessToken),
+        botAccount: bot?.user?.name,
+        notice,
+        noticeBad: Boolean(error),
+        page: Math.max(1, Number(req.query.p) || 1),
+      }),
+    );
+  })().catch((err) => {
+    console.error("[dashboard]", err);
+    res.status(500).send("Dashboard error");
+  });
 }
 
 function parseLength(value: unknown): AiLength {

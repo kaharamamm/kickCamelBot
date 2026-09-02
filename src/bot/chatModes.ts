@@ -1,6 +1,22 @@
-import { getMyChannelCached, sendChatCommand } from "../kick/api.js";
+import {
+  getMyChannelCached,
+  sendChatCommand,
+  type ModSlashResult,
+} from "../kick/api.js";
 import { detectLaughBurst } from "./chatLog.js";
 import { say } from "./outbox.js";
+import { skipSong } from "./songs.js";
+import {
+  isClearOrder,
+  isClipOrder as slangClipOrder,
+  isEmoteOrder,
+  isFollowOrder,
+  isOffOrder,
+  isSkipOrder,
+  isSlowOrder,
+  isSubOrder,
+  looksLikeModSlang,
+} from "./slang.js";
 import type { IncomingChat } from "../types.js";
 
 const AUTO_COOLDOWN_MS = 40 * 60_000;
@@ -19,7 +35,7 @@ export async function streamIsLive(): Promise<boolean> {
   }
 }
 
-export async function sendModSlash(command: string): Promise<boolean> {
+export async function sendModSlash(command: string): Promise<ModSlashResult> {
   return sendChatCommand(command.trim());
 }
 
@@ -28,32 +44,33 @@ export async function setEmoteOnly(on: boolean): Promise<boolean> {
     console.log("[emoteonly] skip, stream offline");
     return false;
   }
-  return sendModSlash(on ? "/emoteonly on" : "/emoteonly off");
+  return sendModSlash(on ? "/emoteonly on" : "/emoteonly off").then((r) => r.ok);
 }
 
 export async function setSlowMode(on: boolean, gapSec = 10): Promise<boolean> {
-  if (!on) return sendModSlash("/slow off");
+  if (!on) return sendModSlash("/slow off").then((r) => r.ok);
   const gap = Math.min(120, Math.max(3, Math.round(gapSec)));
-  return sendModSlash(`/slow on ${gap}`);
+  return sendModSlash(`/slow on ${gap}`).then((r) => r.ok);
 }
 
 export async function setFollowOnly(on: boolean): Promise<boolean> {
-  return sendModSlash(on ? "/followonly on" : "/followonly off");
+  return sendModSlash(on ? "/followonly on" : "/followonly off").then((r) => r.ok);
 }
 
 export async function setSubOnly(on: boolean): Promise<boolean> {
-  return sendModSlash(on ? "/subonly on" : "/subonly off");
+  return sendModSlash(on ? "/subonly on" : "/subonly off").then((r) => r.ok);
 }
 
-export async function clearChat(): Promise<boolean> {
-  return sendModSlash("/clear");
+/** Kick only runs /clear from the browser — OAuth and pasted cookies cannot do it from a server. */
+export async function clearChat(): Promise<ModSlashResult> {
+  return { ok: false, reason: "kick_no_server_clear" };
 }
 
 export async function createClip(opts?: { seconds?: number; title?: string }): Promise<boolean> {
   const seconds = Math.min(180, Math.max(10, Math.round(opts?.seconds ?? 30)));
   const title = (opts?.title ?? "").replace(/[^\p{L}\p{N} _-]/gu, "").trim().slice(0, 48);
   const cmd = title ? `/clip ${seconds} ${title}` : `/clip ${seconds}`;
-  return sendModSlash(cmd);
+  return sendModSlash(cmd).then((r) => r.ok);
 }
 
 export async function pulseEmoteMode(
@@ -138,76 +155,65 @@ export async function maybeAutoClip(broadcasterUserId: number, live: boolean): P
 export async function handleStaffModAsk(chat: IncomingChat): Promise<string | null> {
   const t = chat.content.replace(/\s+/g, " ").trim();
   const low = t.toLowerCase();
-  if (!looksLikeModOrder(low)) return null;
+  if (!looksLikeModSlang(t)) return null;
   const id = chat.broadcaster.user_id;
 
-  if (isOff(low) && /emote/.test(low)) {
+  if (isOffOrder(t) && /emote/.test(low)) {
     if (!(await streamIsLive())) return "Stream is offline — not changing emote-only.";
-    return (await setEmoteOnly(false)) ? "Emote-only is OFF." : fail("emote-only");
+    return (await setEmoteOnly(false)) ? "" : fail("emote-only");
   }
-  if (isOff(low) && /\bslow\b|yavaş/.test(low)) {
-    return (await setSlowMode(false)) ? "Slow mode is OFF." : fail("slow mode");
+  if (isOffOrder(t) && isSlowOrder(t)) {
+    return (await setSlowMode(false)) ? "" : fail("slow mode");
   }
-  if (isOff(low) && /follow|takipçi|takipci/.test(low)) {
-    return (await setFollowOnly(false)) ? "Follower-only is OFF." : fail("follower-only");
+  if (isOffOrder(t) && isFollowOrder(t)) {
+    return (await setFollowOnly(false)) ? "" : fail("follower-only");
   }
-  if (isOff(low) && /\bsub(s|only)?\b|abone/.test(low)) {
-    return (await setSubOnly(false)) ? "Sub-only is OFF." : fail("sub-only");
+  if (isOffOrder(t) && isSubOrder(t)) {
+    return (await setSubOnly(false)) ? "" : fail("sub-only");
   }
 
-  if (isClipOrder(low)) {
+  if (slangClipOrder(t)) {
     const seconds = clipSeconds(low);
     const ok = await createClip({ seconds, title: clipTitle(t) });
-    return ok ? `Clipping the last ${seconds}s.` : fail("clip — Kick may require the clipping program on this account");
+    return ok ? "" : fail("clip — Kick may require the clipping program on this account");
   }
 
-  if (/emote/.test(low)) {
+  if (isEmoteOrder(t)) {
     if (!(await streamIsLive())) return "Stream is offline — not changing emote-only.";
-    const ok = await pulseEmoteMode(id, { force: true, seconds: holdSeconds(low, 20) });
-    return ok ? "" : fail("emote-only");
+    if (/\bpulse\b/.test(low) || /\b\d{1,3}\s*(s|sec|secs|saniye)\b/.test(low)) {
+      const ok = await pulseEmoteMode(id, { force: true, seconds: holdSeconds(low, 20) });
+      return ok ? "" : fail("emote-only");
+    }
+    return (await setEmoteOnly(true)) ? "" : fail("emote-only");
   }
 
-  if (/\bslow\b|yavaş/.test(low)) {
-    const ok = await pulseSlowMode(id, { force: true, seconds: holdSeconds(low, 25), gapSec: 8 });
-    return ok ? "" : fail("slow mode");
+  if (isSlowOrder(t)) {
+    if (/\bpulse\b/.test(low) || /\b\d{1,3}\s*(s|sec|secs|saniye)\b/.test(low)) {
+      const ok = await pulseSlowMode(id, { force: true, seconds: holdSeconds(low, 25), gapSec: 8 });
+      return ok ? "" : fail("slow mode");
+    }
+    return (await setSlowMode(true, holdSeconds(low, 10))) ? "" : fail("slow mode");
   }
 
-  if (/follow|takipçi|takipci/.test(low)) {
-    const on = !isOff(low);
-    return (await setFollowOnly(on)) ? `Follower-only is ${on ? "ON" : "OFF"}.` : fail("follower-only");
+  if (isFollowOrder(t)) {
+    return (await setFollowOnly(!isOffOrder(t))) ? "" : fail("follower-only");
   }
 
-  if (/\bsub(s|only)?\b|sadece sub|abone only/.test(low)) {
-    const on = !isOff(low);
-    return (await setSubOnly(on)) ? `Sub-only is ${on ? "ON" : "OFF"}.` : fail("sub-only");
+  if (isSubOrder(t)) {
+    return (await setSubOnly(!isOffOrder(t))) ? "" : fail("sub-only");
   }
 
-  if (/\bclear\b|temizle|chat'?i sil/.test(low)) {
-    return (await clearChat()) ? "Chat cleared." : fail("clear");
+  if (isClearOrder(t)) {
+    const cleared = await clearChat();
+    return cleared.ok ? "" : fail("clear", cleared.reason);
+  }
+
+  if (isSkipOrder(t)) {
+    const skipped = skipSong();
+    return skipped ? "" : "Queue is already empty.";
   }
 
   return null;
-}
-
-function looksLikeModOrder(low: string): boolean {
-  if (low.length > 140) return false;
-  if (/\b(clip|klip)\b/.test(low) && isClipOrder(low)) return true;
-  if (/emote\s*(only|mod|mode)?|sadece emote/.test(low) && /\b(on|off|aç|kapat|al|yap|et|mode|mod)\b/.test(low)) return true;
-  if (/\bslow\b|yavaş mod/.test(low) && /\b(on|off|aç|kapat|al|mode|mod)\b/.test(low)) return true;
-  if (/follow\s*only|follower|takipçi only|takipci only/.test(low)) return true;
-  if (/sub\s*only|sadece sub|abone only/.test(low)) return true;
-  if (/clear chat|chat'?i temizle|sohbeti temizle/.test(low)) return true;
-  return false;
-}
-
-function isClipOrder(low: string): boolean {
-  if (!/\b(clip|klip)\b/.test(low)) return false;
-  if (/^(clip|klip)\b/.test(low)) return true;
-  return /\b(that|this|it|now|please|pls|al|at|çek|et|yap|şu|bunu|şunu|lütfen)\b/.test(low);
-}
-
-function isOff(low: string): boolean {
-  return /\b(off|kapat|kapa|durdur|disable|bitir)\b/.test(low);
 }
 
 function holdSeconds(low: string, fallback: number): number {
@@ -228,8 +234,9 @@ function clipTitle(text: string): string {
   return cut.slice(0, 48);
 }
 
-function fail(what: string): string {
-  return `Couldn't change ${what}. CamelBot needs mod rights (and Kick slash commands) on this channel.`;
+function fail(what: string, reason?: string): string {
+  const base = `Couldn't change ${what}. CamelBot needs mod rights (and Kick slash commands) on this channel.`;
+  return reason ? `${base.slice(0, -1)} (${reason}).` : base;
 }
 
 export function parseToggleArgs(args: string): "on" | "off" | "pulse" | number | "" {

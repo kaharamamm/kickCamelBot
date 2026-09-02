@@ -48,6 +48,18 @@ export const config = {
     apiKey: process.env.GEMINI_API_KEY?.trim() ?? "",
     model: optional("GEMINI_MODEL", "gemini-3.5-flash-lite"),
   },
+  discord: {
+    enabled: Boolean(process.env.DISCORD_BOT_TOKEN?.trim()),
+    token: process.env.DISCORD_BOT_TOKEN?.trim() ?? "",
+    clientId: process.env.DISCORD_CLIENT_ID?.trim() ?? "",
+    guildId: process.env.DISCORD_GUILD_ID?.trim() ?? "",
+    channelId: process.env.DISCORD_CHANNEL_ID?.trim() ?? "",
+    postChannelId: process.env.DISCORD_POST_CHANNEL_ID?.trim() ?? "",
+    alwaysReplyUserIds: (process.env.DISCORD_ALWAYS_REPLY_USER_IDS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  },
 };
 
 export function assertReadyForAuth(): void {

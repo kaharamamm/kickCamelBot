@@ -1,3 +1,4 @@
+import { WebSocket as WsWebSocket } from "ws";
 import { extraChannels, extraChannelSlugs, rememberChannelMeta } from "../bot/channelStore.js";
 import { startEngagement, stopEngagement } from "../bot/engagement.js";
 import { startTimedCommands, stopTimedCommands } from "../bot/timed.js";
@@ -7,11 +8,16 @@ import { getMyChannel } from "./api.js";
 import { lookupPublicChannel } from "./publicChannel.js";
 import type { ChatMessageEvent, KickActor } from "../types.js";
 
+const LiveSocket = (
+  typeof globalThis.WebSocket === "function" ? globalThis.WebSocket : WsWebSocket
+) as typeof WebSocket;
+
 const PUSHER_URL =
   "wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?protocol=7&client=js&version=8.4.0&flash=false";
 
 export let liveChatStatus = "disconnected";
 export let liveChatChannels: string[] = [];
+export let liveChatArmed = false;
 
 type Room = {
   slug: string;
@@ -79,6 +85,7 @@ export async function startLiveChat(): Promise<void> {
 
   if (rooms.length === 0) throw new Error("No Kick chatrooms to join");
   liveChatChannels = rooms.map((r) => r.slug);
+  liveChatArmed = true;
   connect(rooms);
   startEngagement(
     rooms.map((r) => ({ slug: r.slug, broadcasterUserId: r.broadcaster.user_id })),
@@ -90,25 +97,38 @@ export async function startLiveChat(): Promise<void> {
 }
 
 export function liveChatListening(): boolean {
-  return Boolean(active && active.readyState === WebSocket.OPEN);
+  return Boolean(active && active.readyState === 1);
 }
 
 export function stopLiveChat(): void {
   generation += 1;
+  liveChatArmed = false;
   stopEngagement();
   stopTimedCommands();
-  try {
-    active?.close();
-  } catch {
-    // ignore
-  }
+  dropSocket(active);
   active = undefined;
 }
 
+function dropSocket(ws: WebSocket | undefined): void {
+  if (!ws) return;
+  try {
+    const nodeWs = ws as WebSocket & { removeAllListeners?: () => void };
+    nodeWs.removeAllListeners?.();
+    nodeWs.onopen = null;
+    nodeWs.onmessage = null;
+    nodeWs.onclose = null;
+    nodeWs.onerror = null;
+    if (ws.readyState === 0 || ws.readyState === 1) ws.close();
+  } catch {
+    // ignore
+  }
+}
+
 function connect(rooms: Room[]): void {
+  dropSocket(active);
   const byChatroom = new Map(rooms.map((r) => [r.chatroomId, r]));
   const gen = generation;
-  const ws = new WebSocket(PUSHER_URL);
+  const ws = new LiveSocket(PUSHER_URL);
   active = ws;
   let ping: ReturnType<typeof setInterval> | undefined;
   let joined = 0;
@@ -138,7 +158,7 @@ function connect(rooms: Room[]): void {
         }
       }
       ping = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
+        if (ws.readyState === 1) {
           ws.send(JSON.stringify({ event: "pusher:ping", data: {} }));
         }
       }, 90_000);
@@ -163,7 +183,7 @@ function connect(rooms: Room[]): void {
       rooms[0];
     if (!room) return;
     const incoming: ChatMessageEvent = {
-      message_id: String(payload.id ?? `${Date.now()}`),
+      message_id: String(payload.id ?? `${room.chatroomId}:${payload.sender.id ?? payload.sender.username}:${payload.content.slice(0, 80)}`),
       content: payload.content,
       created_at: payload.created_at,
       emotes: Array.isArray(payload.emotes) ? payload.emotes : undefined,

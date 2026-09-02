@@ -67,29 +67,51 @@ npm run dev
 
 Open [http://localhost:3000/login](http://localhost:3000/login), log into **your streamer Kick account**, and allow CamelBot.
 
-After that the bot can **send** chat and run title / leaderboard / rewards commands. It still cannot **read** live chat until webhooks are on.
+After that the bot can **send** chat, **read** live chat, and run title / leaderboard / rewards commands. Leave the dashboard tab closed; Kick talk does not go through localhost.
 
-## 4. Receive chat (webhooks)
+## 4. Keep it running on this PC
 
-Kick only delivers chat to a **public HTTPS** URL. Localhost is not enough.
+Live chat uses Kick's socket. **No public IP, Cloudflare, or webhook is required** for commands and @CamelBot.
 
-While `npm run dev` is running, in another terminal:
+This PC is already `192.168.1.37` on your LAN. Open the dashboard from any device on the same Wi‑Fi/modem:
 
-```bash
-# if you have cloudflared:
-cloudflared tunnel --url http://localhost:3000
+```text
+http://192.168.1.37:3000
 ```
 
-Or use ngrok: `ngrok http 3000`.
+In the modem, reserve that address for this PC (DHCP reservation) so it does not change. **Do not port-forward port 3000** to the internet — the dashboard has no password.
 
-Copy the `https://....trycloudflare.com` (or ngrok) URL and:
+To start CamelBot when the **PC boots** (no Windows logon task):
 
-1. Kick → Developer → CamelBot → turn **Web kancalarını etkinleştirin** ON
-2. Webhook URL: `https://YOUR-TUNNEL/webhooks/kick`
-3. Save
-4. Open [http://localhost:3000/login](http://localhost:3000/login) once more so the bot can subscribe to `chat.message.sent`
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install-autostart.ps1
+```
 
-Then type `!ping` in your Kick chat. You should see `pong`.
+Run that as Administrator if you want it up before anyone signs into Windows. Logs: `data/camelbot.log`.
+
+## 5. Webhooks (follows, subs, gifts, title)
+
+Kick will not send those events to a LAN IP. Formula:
+
+```text
+Kick Developer webhook URL
+  -> Cloudflare quick tunnel (HTTPS)
+    -> only /webhooks/kick on this PC
+      -> CamelBot
+```
+
+The dashboard stays on `http://192.168.1.37:3000`. The tunnel hostname is public, but CamelBot answers **only** `/webhooks/kick` from it.
+
+1. CamelBot must already be running (`npm run dev` or `npm start`).
+2. In another terminal:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start-webhook-tunnel.ps1
+```
+
+3. Copy `https://….trycloudflare.com/webhooks/kick` into Kick → Developer → CamelBot → webhooks ON.
+4. Open http://localhost:3000/login once so subscriptions refresh.
+5. Leave the tunnel window open. If it restarts, the hostname changes — paste the new URL into Kick again.
 
 ## Notes
 
