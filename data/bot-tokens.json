@@ -1,0 +1,12 @@
+{
+  "accessToken": "MJQ3ZMRMYMITM2IYZI0ZNDC2LTKWZGMTMZU4NDG0YJZHYTEW",
+  "refreshToken": "MTDMNTHLYTETNDIYYY01ZDJHLTK4ZDYTZJY0NDFMN2I2NGEY",
+  "expiresAt": 1788362777557,
+  "scope": "user:read chat:write",
+  "user": {
+    "user_id": 127376524,
+    "name": "CamelBot",
+    "email": "kickcamelbot@gmail.com",
+    "profile_picture": "https://kick.com/img/default-profile-pictures/default-avatar-5.webp"
+  }
+}
