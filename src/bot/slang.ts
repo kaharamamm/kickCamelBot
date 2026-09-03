@@ -100,15 +100,22 @@ export function isTitleOrder(text: string): boolean {
   const t = fold(text);
   return (
     /(?:change|set|update|degistir).{0,24}(?:title|baslik)/.test(t) ||
-    /(?:title|baslik).{0,40}(?:to|as|yap|olsun|:|=)/.test(t)
+    /(?:title|baslik).{0,60}(?:to|as|yap|olsun|degistir|guncelle|:|=)/.test(t) ||
+    /(?:oyle|aynen|tamam|ok).{0,28}(?:yap|degistir|guncelle).{0,20}(?:baslik|title)/.test(t) ||
+    /(?:basligi?|title(?:yi)?)\s*(?:degistir|guncelle|yap)\b/.test(t) ||
+    /(?:yap|degistir|guncelle)\s+(?:su\s+|o\s+)?(?:basligi?|title)\b/.test(t) ||
+    /(?:basligi?|title)\s+.{2,80}\s+(?:yap|olsun)\s*$/.test(t)
   );
 }
 
 export function isCategoryOrder(text: string): boolean {
   const t = fold(text);
   return (
-    /(?:change|set|update|degistir).{0,24}(?:category|kategori|game)/.test(t) ||
-    /(?:category|kategori|game).{0,40}(?:to|as|yap|olsun|:|=)/.test(t)
+    /(?:change|set|update|degistir|cevir|çevir).{0,36}(?:category|kategori|game|\boyun)/.test(t) ||
+    /(?:category|kategori|game|\boyun(?:u|umu|unu)?\b).{0,48}(?:to|as|yap|olsun|ye|ya|cevir|çevir|:|=)/.test(t) ||
+    /(?:benim|bizim|yayin(?:in)?|stream(?:in)?)\s+(?:oyun(?:u|umu)?|game|kategori(?:yi)?|category).{0,48}(?:cevir|çevir|yap|olsun|degistir)/.test(
+      t,
+    )
   );
 }
 
@@ -127,8 +134,28 @@ export function isUnpinOrder(text: string): boolean {
 }
 
 export function extractQuoted(text: string): string | null {
-  const hit = text.match(/["'""'']([^"'""''"]+)["'""''"]/);
+  const hit = text.match(/["'“”«»]([^"'“”«»]{3,100})["'“”«»]/);
   return hit?.[1]?.trim() || null;
+}
+
+/** Short "ok do it / tamam yap" confirmations — need conversation context to mean anything. */
+export function isConfirmApply(text: string): boolean {
+  const f = fold(text)
+    .replace(/[?!.,]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!f || f.length > 48) return false;
+  // Require a do-verb (plain "tamam" alone is too weak — just acknowledgment)
+  if (
+    /^(?:tamam|ok|okay|aynen|oyle|evet|yes|yep|yeah|sure|alright)\s+(?:onu|bunu|sunu|oyle\s+)?(?:yap|yapsana|yapsene|yapalim|koy|degistir|guncelle|do it|go ahead|apply|set it)$/.test(
+      f,
+    )
+  ) {
+    return true;
+  }
+  if (/^(?:yap|yapsana|yapsene|yapalim|koy|do it|go ahead|apply it|set it)$/.test(f)) return true;
+  if (/^(?:aynen|oyle)$/.test(f)) return true;
+  return false;
 }
 
 export function isWriteIntent(text: string): boolean {

@@ -6,8 +6,15 @@ import type { KickActor } from "../types.js";
 
 const path = join(fileURLToPath(new URL(".", import.meta.url)), "../../data/memory.json");
 const MAX_PEOPLE = 250;
-const KING_ID = 549839;
+export const KING_ID = 549839;
+const RAREAKUMA_ID = 26344932;
 const MIN_LINES_FOR_SUMMARY = 5;
+const KING_NOTE =
+  "Streamer. Bot owner. Camel king persona. Often chats in Turkish. Do not insult directly — occasional sly jab at most.";
+const DISPLAY_NAME: Record<string, string> = {
+  king: "MCVCKaharamamm",
+  rareakuma: "RareAkuma",
+};
 const LORE_OTHERS = [
   "rareakuma",
   "rarekuma",
@@ -27,6 +34,7 @@ type Person = {
 
 const people = new Map<number, Person>();
 const buffers = new Map<number, string[]>();
+const redirects = new Map<number, number>();
 const timers = new Map<number, ReturnType<typeof setTimeout>>();
 let loaded = false;
 let writing = false;
@@ -46,6 +54,7 @@ function hydrate(): void {
   } catch {
     // first run
   }
+  mergeDuplicatePeople();
 }
 
 function escapeRe(value: string): string {
@@ -87,9 +96,165 @@ function tidyStoredSummary(username: string, summary: string, userId: number, ni
   const banned = userId === KING_ID ? others : others.filter((n) => !allowed.has(n));
   s = dropOtherPeople(s, banned);
   if (userId === KING_ID && /stay calm|chill out|telling everyone to stay calm/i.test(s)) {
-    s = "Streamer. Camel king persona. Often chats in Turkish.";
+    s = KING_NOTE;
   }
+  if (userId === KING_ID) s = tidyKingSummary(s);
   return s.slice(0, 240);
+}
+
+function foldName(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize("NFKC")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function identityKey(username: string, nick?: string): string {
+  const names = [username, nick].filter(Boolean).map((n) => foldName(n!));
+  for (const n of names) {
+    if (n.includes("kaharamamm") || n === "mcvck" || n.includes("camelamamm")) return "king";
+    if (n === "rareakuma" || n === "rarekuma") return "rareakuma";
+    if (n.includes("sjoe")) return "sjoe";
+  }
+  return names[0] || "";
+}
+
+function canonicalIdForKey(key: string, ids: number[]): number {
+  if (key === "king") return KING_ID;
+  if (key === "rareakuma") return RAREAKUMA_ID;
+  const withBio = ids.filter((id) => people.get(id)?.bio).sort((a, b) => a - b)[0];
+  if (withBio) return withBio;
+  return Math.min(...ids);
+}
+
+function followRedirects(userId: number): number {
+  let id = userId;
+  const seen = new Set<number>();
+  while (redirects.has(id) && !seen.has(id)) {
+    seen.add(id);
+    id = redirects.get(id)!;
+  }
+  return id;
+}
+
+function resolvePersonId(userId: number, username?: string, nick?: string): number {
+  const redirected = followRedirects(userId);
+  if (redirected === KING_ID || userId === KING_ID) return KING_ID;
+  const key = username ? identityKey(username, nick) : "";
+  if (key === "king") return KING_ID;
+  if (key === "rareakuma") return RAREAKUMA_ID;
+  if (key) {
+    for (const [id, row] of people) {
+      if (identityKey(row.username, row.nick) === key) return id;
+    }
+  }
+  return redirected;
+}
+
+function mergeDuplicatePeople(): void {
+  const groups = new Map<string, number[]>();
+  for (const [id, row] of people) {
+    const key = identityKey(row.username, row.nick);
+    if (!key) continue;
+    const list = groups.get(key) ?? [];
+    list.push(id);
+    groups.set(key, list);
+  }
+  let changed = false;
+  for (const [id, row] of people) {
+    const key = identityKey(row.username, row.nick);
+    const pinned = DISPLAY_NAME[key];
+    if (pinned && (row.username !== pinned || row.nick !== pinned)) {
+      row.username = pinned;
+      row.nick = pinned;
+      people.set(id, row);
+      changed = true;
+    }
+  }
+  for (const [key, ids] of groups) {
+    const canonical = canonicalIdForKey(key, ids);
+    if (!people.has(canonical)) {
+      const donorId = ids.find((id) => people.get(id)?.bio) ?? ids[0];
+      const donor = donorId ? people.get(donorId) : undefined;
+      if (donor) people.set(canonical, { ...donor });
+      changed = true;
+    }
+    for (const id of ids) {
+      if (id === canonical) continue;
+      absorbPerson(canonical, id);
+      changed = true;
+    }
+  }
+  if (changed) persist();
+}
+
+function absorbPerson(intoId: number, fromId: number): void {
+  const from = people.get(fromId);
+  if (!from) return;
+  const into = people.get(intoId);
+  people.set(intoId, into ? mergeRows(intoId, into, from) : { ...from });
+  people.delete(fromId);
+  redirects.set(fromId, intoId);
+  const mergedBuf = [...(buffers.get(intoId) ?? []), ...(buffers.get(fromId) ?? [])];
+  if (mergedBuf.length) buffers.set(intoId, mergedBuf.slice(-12));
+  buffers.delete(fromId);
+}
+
+function mergeRows(userId: number, a: Person, b: Person): Person {
+  const key = identityKey(a.username, a.nick) || identityKey(b.username, b.nick);
+  const pinned = DISPLAY_NAME[key];
+  const username =
+    pinned ||
+    (a.bio && !b.bio ? a.username : b.bio && !a.bio ? b.username : preferUsername(a.username, b.username));
+  const nick = pinned || (a.nick && a.nick !== a.username ? a.nick : b.nick && b.nick !== b.username ? b.nick : username);
+  return {
+    username,
+    nick,
+    bio: a.bio || b.bio,
+    summary: tidyStoredSummary(username, mergeSummaries(a.summary, b.summary), userId, nick),
+    lastAt: Math.max(a.lastAt ?? 0, b.lastAt ?? 0),
+    lastSummaryAt: Math.max(a.lastSummaryAt ?? 0, b.lastSummaryAt ?? 0),
+  };
+}
+
+function preferUsername(a: string, b: string): string {
+  if (foldName(a) === foldName(b)) {
+    const caps = (s: string) => (s.match(/[A-Z]/g) ?? []).length;
+    return caps(a) >= caps(b) ? a : b;
+  }
+  return a.length >= b.length ? a : b;
+}
+
+function mergeSummaries(a: string, b: string): string {
+  const parts = [...splitSentences(a), ...splitSentences(b)];
+  const out: string[] = [];
+  const seen: string[] = [];
+  for (const part of parts) {
+    const k = foldName(part);
+    if (!k) continue;
+    if (seen.some((s) => s.includes(k) || k.includes(s))) continue;
+    seen.push(k);
+    out.push(part);
+  }
+  return out.join(" ").trim();
+}
+
+function splitSentences(text: string): string[] {
+  return text
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.replace(/^kick chatter\s+\w+\s+[—-]\s+/i, "").trim())
+    .filter(Boolean);
+}
+
+function tidyKingSummary(summary: string): string {
+  const s = summary.replace(/\s+/g, " ").trim();
+  if (!s || /broken turkish|rank\s*736|delusion|spamming his|self-proclaimed camel king still/i.test(s)) {
+    return KING_NOTE;
+  }
+  if (/do not insult|sly jab|camel king persona/i.test(s)) return s.slice(0, 240);
+  return KING_NOTE;
 }
 
 function persist(): void {
@@ -99,7 +264,9 @@ function persist(): void {
     writing = false;
     hydrate();
     const out: Record<string, Person> = {};
-    const rows = [...people.entries()].sort((a, b) => b[1].lastAt - a[1].lastAt).slice(0, MAX_PEOPLE);
+    const rows = [...people.entries()]
+      .sort((a, b) => (a[0] === KING_ID ? -1 : b[0] === KING_ID ? 1 : b[1].lastAt - a[1].lastAt))
+      .slice(0, MAX_PEOPLE);
     for (const [id, row] of rows) {
       out[String(id)] = {
         ...row,
@@ -120,8 +287,15 @@ export function listPeople(): Array<{
   lastAt: number;
 }> {
   hydrate();
+  mergeDuplicatePeople();
   return [...people.entries()]
-    .sort((a, b) => b[1].lastAt - a[1].lastAt)
+    .sort((a, b) => {
+      if (a[0] === KING_ID) return -1;
+      if (b[0] === KING_ID) return 1;
+      if (identityKey(a[1].username, a[1].nick) === "king") return -1;
+      if (identityKey(b[1].username, b[1].nick) === "king") return 1;
+      return b[1].lastAt - a[1].lastAt;
+    })
     .map(([userId, row]) => ({
       userId,
       username: row.username,
@@ -134,7 +308,7 @@ export function listPeople(): Array<{
 
 export function personNote(userId: number): string {
   hydrate();
-  const row = people.get(userId);
+  const row = people.get(resolvePersonId(userId)) ?? people.get(userId);
   if (!row) return "";
   return [row.nick && row.nick !== row.username ? `Nick: ${row.nick}` : "", row.bio ? `Bio: ${row.bio}` : "", row.summary]
     .filter(Boolean)
@@ -145,23 +319,32 @@ export function personNote(userId: number): string {
 export function seedPersonMemory(userId: number, username: string, summary: string, nick?: string): void {
   if (!userId) return;
   hydrate();
-  const existing = people.get(userId);
+  const id = resolvePersonId(userId, username, nick);
+  const existing = people.get(id);
+  const key = identityKey(existing?.username || username, existing?.nick || nick);
+  const pinned = DISPLAY_NAME[key];
   const seed = summary.replace(/\s+/g, " ").trim().slice(0, 240);
-  people.set(userId, {
-    username,
-    nick: nick ?? existing?.nick ?? username,
+  const merged = existing?.summary
+    ? tidyStoredSummary(existing.username, mergeSummaries(existing.summary, seed), id, existing.nick || nick)
+    : tidyStoredSummary(username, seed, id, nick);
+  people.set(id, {
+    username: pinned || existing?.username || username,
+    nick: pinned || existing?.nick || nick || username,
     bio: existing?.bio,
-    summary: existing?.summary && existing.summary.length >= seed.length ? existing.summary : seed,
-    lastAt: Date.now(),
+    summary: merged || seed,
+    lastAt: existing?.lastAt ?? Date.now(),
     lastSummaryAt: existing?.lastSummaryAt ?? 0,
   });
+  mergeDuplicatePeople();
   persist();
 }
 
 export function rememberPerson(actor: KickActor, lastText?: string): void {
   if (!actor.user_id) return;
   hydrate();
-  if (lastText?.trim()) queueSummary(actor, lastText);
+  const id = resolvePersonId(actor.user_id, actor.username);
+  const mapped = { ...actor, user_id: id };
+  if (lastText?.trim()) queueSummary(mapped, lastText);
 }
 
 export function noteExchange(userId: number, username: string, userText: string, _botText?: string): void {

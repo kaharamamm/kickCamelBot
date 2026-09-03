@@ -6,6 +6,8 @@ export type DiscordIdentity = {
   label: string;
   seedSummary: string;
   isKing?: boolean;
+  /** Kick user id when this Discord account is the same person. */
+  kickUserId?: number;
 };
 
 /** Known Discord users — linked to Kick channel lore for better roasts. */
@@ -13,6 +15,7 @@ export const DISCORD_IDENTITIES: Record<string, DiscordIdentity> = {
   [DISCORD_KING_ID]: {
     label: "mcvckaharamamm",
     isKing: true,
+    kickUserId: 549839,
     seedSummary:
       "Streamer. Bot owner on Discord. Camel king persona. Often chats in Turkish. Do not insult directly — occasional sly jab at most.",
   },
@@ -23,8 +26,9 @@ export const DISCORD_IDENTITIES: Record<string, DiscordIdentity> = {
   },
   "226817648556507138": {
     label: "rareakuma",
+    kickUserId: 26344932,
     seedSummary:
-      "Kick chatter rareakuma — Meepo player, Immortal ~5900 MMR. Roast what he says; Meepo or bald jokes only if he brought them up.",
+      "Meepo player, Immortal ~5900 MMR. Aggressive in chat, tilts easily. Roast what he says; Meepo or bald jokes only if he brought them up.",
   },
 };
 
@@ -38,6 +42,8 @@ export function discordKingUserId(): string {
 }
 
 export function discordUserKey(id: string): number {
+  const linked = DISCORD_IDENTITIES[id]?.kickUserId;
+  if (linked) return linked;
   const n = Number(id);
   if (Number.isSafeInteger(n)) return n;
   let h = 0;

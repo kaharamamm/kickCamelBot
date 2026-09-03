@@ -11,6 +11,8 @@ import { personNote, noteExchange } from "./memory.js";
 import { maybeRandomEmoteMode } from "./emoteMode.js";
 import { noteStreamContext } from "./recap.js";
 import { config } from "../config.js";
+import { formatKickEmote, pickRandomKickEmote, resolveEmoteToken, spamKickEmote } from "./kickEmotes.js";
+import { botOk, botThink } from "./activityLog.js";
 
 const TICK_MS = 30_000;
 const JOIN_EVERY_MS = 3 * 60_000;
@@ -18,6 +20,8 @@ const IDLE_MIN_MS = 5 * 60_000;
 const IDLE_MAX_MS = 10 * 60_000;
 const EMOTE_COOLDOWN_MS = 45_000;
 const QUESTION_COOLDOWN_MS = 20_000;
+/** ~1 in 100_000 messages — chaotic random emote burst */
+const CHAOS_EMOTE_ODDS = 100_000;
 
 type RoomRef = {
   slug: string;
@@ -71,10 +75,30 @@ export async function maybeJoinEmoteSpam(broadcasterUserId: number): Promise<boo
   if (!token) return false;
   const last = lastEmote.get(broadcasterUserId) ?? 0;
   if (Date.now() - last < EMOTE_COOLDOWN_MS) return false;
+  const resolved = await resolveEmoteToken(token);
+  if (!resolved) return false;
   lastEmote.set(broadcasterUserId, Date.now());
   lastPosted.set(broadcasterUserId, Date.now());
   const repeat = Math.min(6, 3 + Math.floor(Math.random() * 4));
-  await say(Array(repeat).fill(token).join(" "), undefined, broadcasterUserId);
+  const line = (await spamKickEmote(resolved, repeat)) || Array(repeat).fill(resolved).join(" ");
+  botThink("emote", `Joining spam: ${resolved.slice(0, 40)} x${repeat}`);
+  await say(line, undefined, broadcasterUserId);
+  return true;
+}
+
+/** Extremely rare: spam a random owned emote back-to-back for no reason. */
+export async function maybeChaosEmoteSpam(broadcasterUserId: number): Promise<boolean> {
+  if (Math.random() * CHAOS_EMOTE_ODDS >= 1) return false;
+  const last = lastEmote.get(broadcasterUserId) ?? 0;
+  if (Date.now() - last < EMOTE_COOLDOWN_MS) return false;
+  const emote = await pickRandomKickEmote();
+  if (!emote) return false;
+  lastEmote.set(broadcasterUserId, Date.now());
+  lastPosted.set(broadcasterUserId, Date.now());
+  const n = 5 + Math.floor(Math.random() * 4);
+  const line = Array(n).fill(formatKickEmote(emote)).join(" ");
+  botOk("emote", `Chaos spam ${emote.name} x${n}`);
+  await say(line, undefined, broadcasterUserId);
   return true;
 }
 

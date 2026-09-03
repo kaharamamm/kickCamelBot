@@ -51,12 +51,12 @@ export function noteHeat(broadcasterUserId: number, userId: number, insulting: b
 }
 
 export function timeoutRoast(username: string, lang: "tr" | "en" | "other"): string {
-  if (lang === "tr") return `@${username} 3 saniye. Bak, susturmayı biliyorum.`;
-  return `@${username} 3 seconds. See? I know how to shut you up.`;
+  if (lang === "tr") return `@${username} 5 saniye. Bak, susturmayı biliyorum.`;
+  return `@${username} 5 seconds. See? I know how to shut you up.`;
 }
 
 export function ensureWarning(text: string, lang: "tr" | "en" | "other"): string {
-  if (/shut you up|sustur|kapat[ıi]r[ıi]m|kestiririm|susacaks[ıi]n|timeout|3 saniye/i.test(text)) {
+  if (/shut you up|sustur|kapat[ıi]r[ıi]m|kestiririm|susacaks[ıi]n|timeout|5 saniye|3 saniye/i.test(text)) {
     return text;
   }
   const extra =

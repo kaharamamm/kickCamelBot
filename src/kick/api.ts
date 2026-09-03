@@ -3,7 +3,12 @@ import { promisify } from "node:util";
 import { config } from "../config.js";
 import { refreshAccessToken } from "../auth/oauth.js";
 import { loadBotTokens, loadTokens, saveBotTokens, saveTokens } from "../auth/tokenStore.js";
-import { hasSiteSession, loadSiteSession, parseXsrfToken } from "../auth/siteSession.js";
+import {
+  hasSiteSession,
+  loadSiteSession,
+  parseSessionToken,
+  parseXsrfToken,
+} from "../auth/siteSession.js";
 import { lookupPublicChannel } from "./publicChannel.js";
 import type {
   ChannelReward,
@@ -34,6 +39,21 @@ async function authorizedFetch(path: string, init: RequestInit = {}): Promise<Re
   headers.set("Authorization", `Bearer ${tokens.accessToken}`);
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
+  }
+  return fetch(`${config.kick.apiBase}${path}`, { ...init, headers });
+}
+
+/** Prefer the linked bot account for mod actions (ban/timeout/delete) so the streamer isn't the actor. */
+async function moderationFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const bot = await getValidBotTokens();
+  const tokens = bot ?? (await getValidTokens());
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${tokens.accessToken}`);
+  if (init.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (!bot) {
+    console.warn("[mod] bot account not linked — falling back to streamer token");
   }
   return fetch(`${config.kick.apiBase}${path}`, { ...init, headers });
 }
@@ -221,14 +241,41 @@ async function kickSiteSessionPost(
   });
 }
 
-/** Run a Kick mod slash command (/clear, /slow, …) via kick.com site session — OAuth cannot do this. */
+type ChatroomModePatch = {
+  slow_mode?: boolean;
+  message_interval?: number;
+  emotes_mode?: boolean;
+  followers_mode?: boolean;
+  following_min_duration?: number;
+  subscribers_mode?: boolean;
+};
+
+/**
+ * Kick public OAuth cannot run /clear or chat modes (only title/ban/etc).
+ * Site session_token (streamer browser login) can — use that as the real actor.
+ */
 export async function sendChatCommand(content: string): Promise<ModSlashResult> {
   const cmd = content.trim();
   if (!cmd.startsWith("/")) return { ok: false, reason: "not_a_slash_command" };
 
   const channel = await getMyChannel();
   const slug = channel.slug.toLowerCase();
+  const parts = cmd.replace(/^\//, "").split(/\s+/);
+  const name = (parts[0] ?? "").toLowerCase();
+  const parameter = parts.length > 1 ? parts.slice(1).join(" ") : null;
 
+  const modePatch = chatModePatchFromSlash(name, parameter);
+  if (modePatch) return patchChatroomModes(slug, modePatch);
+
+  const payload = { command: name, parameter };
+  const siteToken = siteSessionBearer();
+  if (siteToken) {
+    const viaSite = await kickChatCommandWithBearer(slug, siteToken, payload);
+    if (viaSite.ok) return viaSite;
+    console.warn("[chat-cmd] site session_token", cmd, viaSite.reason);
+  }
+
+  // Cookie + XSRF fallback (often 401 if kick_session expired; session_token path above is preferred).
   if (!hasSiteSession()) {
     return { ok: false, reason: "site_session_required" };
   }
@@ -239,15 +286,8 @@ export async function sendChatCommand(content: string): Promise<ModSlashResult> 
     return { ok: false, reason: "site_session_invalid" };
   }
 
-  const parts = cmd.replace(/^\//, "").split(/\s+/);
-  const name = parts[0] ?? "";
-  const parameter = parts.length > 1 ? parts.slice(1).join(" ") : null;
-
   const cmdUrl = `https://kick.com/api/v2/channels/${encodeURIComponent(slug)}/chat-commands`;
-  const { status, body: raw } = await kickSiteSessionPost(cmdUrl, slug, session.cookie, xsrf, {
-    command: name,
-    parameter,
-  });
+  const { status, body: raw } = await kickSiteSessionPost(cmdUrl, slug, session.cookie, xsrf, payload);
 
   if (status >= 200 && status < 300) {
     try {
@@ -264,7 +304,170 @@ export async function sendChatCommand(content: string): Promise<ModSlashResult> 
 
   const lastReason = status ? `site_api_${status}` : "site_api_network_error";
   if (status !== 404 && status !== 422) {
-    console.warn("[chat-cmd] site session", cmd, status, raw.slice(0, 180));
+    console.warn("[chat-cmd] site cookies", cmd, status, raw.slice(0, 180));
+  }
+  return { ok: false, reason: lastReason };
+}
+
+function siteSessionBearer(): string | null {
+  const session = loadSiteSession();
+  if (!session?.cookie) return null;
+  return parseSessionToken(session.cookie) ?? null;
+}
+
+function siteAuthHeaders(slug: string, token: string): Record<string, string> {
+  const session = loadSiteSession();
+  const cookie = session?.cookie ?? "";
+  const xsrf = cookie ? parseXsrfToken(cookie) : undefined;
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+    Origin: "https://kick.com",
+    Referer: `https://kick.com/${slug}`,
+    "User-Agent": SITE_UA,
+  };
+  if (cookie) headers.Cookie = cookie;
+  if (xsrf) {
+    headers["X-XSRF-TOKEN"] = xsrf;
+    headers["X-Requested-With"] = "XMLHttpRequest";
+  }
+  return headers;
+}
+
+function chatModePatchFromSlash(name: string, parameter: string | null): ChatroomModePatch | null {
+  const args = (parameter ?? "").trim().toLowerCase();
+  const on = !args || args === "on" || args.startsWith("on ");
+
+  if (name === "slow" || name === "slowmode") {
+    if (!on || args === "off") return { slow_mode: false };
+    const gapMatch = args.match(/(?:^on\s+)?(\d+)/);
+    const gap = Math.min(120, Math.max(1, Number(gapMatch?.[1] ?? 10)));
+    return { slow_mode: true, message_interval: gap };
+  }
+  if (name === "emoteonly" || name === "emotesonly") {
+    return { emotes_mode: on && args !== "off" };
+  }
+  if (name === "followonly" || name === "followers") {
+    if (!on || args === "off") return { followers_mode: false, following_min_duration: 0 };
+    const mins = Math.max(0, Number(args.match(/(\d+)/)?.[1] ?? 0));
+    return { followers_mode: true, following_min_duration: Math.max(1, mins || 1) };
+  }
+  if (name === "subonly" || name === "subscribers") {
+    return { subscribers_mode: on && args !== "off" };
+  }
+  return null;
+}
+
+async function patchChatroomModes(slug: string, patch: ChatroomModePatch): Promise<ModSlashResult> {
+  const token = siteSessionBearer();
+  if (!token) return { ok: false, reason: "site_session_required" };
+
+  const url = `https://kick.com/api/v2/channels/${encodeURIComponent(slug)}/chatroom`;
+  const headers = siteAuthHeaders(slug, token);
+  const body = JSON.stringify(patch);
+
+  // Prefer curl (better Cloudflare TLS fingerprint) then fetch.
+  const viaCurl = await kickCurlRequest(url, slug, { method: "PUT", headers, body });
+  if (viaCurl.status >= 200 && viaCurl.status < 300) {
+    return parseChatroomPutResult(viaCurl.body, patch);
+  }
+
+  try {
+    const res = await fetch(url, { method: "PUT", headers, body });
+    const raw = await res.text();
+    if (!res.ok) {
+      console.warn("[chatroom] put", res.status, raw.slice(0, 180));
+      return { ok: false, reason: viaCurl.status ? `chatroom_api_${viaCurl.status}` : `chatroom_api_${res.status}` };
+    }
+    return parseChatroomPutResult(raw, patch);
+  } catch (err) {
+    console.warn("[chatroom] network", err);
+    return { ok: false, reason: viaCurl.status ? `chatroom_api_${viaCurl.status}` : "chatroom_network_error" };
+  }
+}
+
+function parseChatroomPutResult(raw: string, patch: ChatroomModePatch): ModSlashResult {
+  try {
+    const json = JSON.parse(raw) as {
+      slow_mode?: { enabled?: boolean };
+      emotes_mode?: { enabled?: boolean };
+      followers_mode?: { enabled?: boolean };
+      subscribers_mode?: { enabled?: boolean };
+    };
+    if (patch.slow_mode !== undefined && Boolean(json.slow_mode?.enabled) !== patch.slow_mode) {
+      return { ok: false, reason: "chatroom_slow_not_applied" };
+    }
+    if (patch.emotes_mode !== undefined && Boolean(json.emotes_mode?.enabled) !== patch.emotes_mode) {
+      return { ok: false, reason: "chatroom_emote_not_applied" };
+    }
+    if (patch.followers_mode !== undefined && Boolean(json.followers_mode?.enabled) !== patch.followers_mode) {
+      return { ok: false, reason: "chatroom_follow_not_applied" };
+    }
+    if (
+      patch.subscribers_mode !== undefined &&
+      Boolean(json.subscribers_mode?.enabled) !== patch.subscribers_mode
+    ) {
+      return { ok: false, reason: "chatroom_sub_not_applied" };
+    }
+  } catch {
+    /* non-json ok */
+  }
+  return { ok: true };
+}
+
+async function kickChatCommandWithBearer(
+  slug: string,
+  accessToken: string,
+  payload: { command: string; parameter: string | null },
+): Promise<ModSlashResult> {
+  const urls = [
+    `https://kick.com/api/v2/channels/${encodeURIComponent(slug)}/chat-commands`,
+    `https://kick.com/api/v1/channels/${encodeURIComponent(slug)}/chat-commands`,
+  ];
+  let lastReason = "oauth_chat_command_failed";
+  const headers = siteAuthHeaders(slug, accessToken);
+  const body = JSON.stringify(payload);
+
+  for (const url of urls) {
+    const viaCurl = await kickCurlRequest(url, slug, { method: "POST", headers, body });
+    if (viaCurl.status >= 200 && viaCurl.status < 300) {
+      try {
+        const json = JSON.parse(viaCurl.body) as { success?: boolean; message?: string };
+        if (json.success === false) {
+          lastReason = json.message?.trim() || "chat_command_rejected";
+          continue;
+        }
+      } catch {
+        /* ok */
+      }
+      return { ok: true };
+    }
+    if (viaCurl.status) lastReason = `oauth_api_${viaCurl.status}`;
+
+    try {
+      const res = await fetch(url, { method: "POST", headers, body });
+      const raw = await res.text();
+      if (res.ok) {
+        try {
+          const json = JSON.parse(raw) as { success?: boolean; message?: string };
+          if (json.success === false) {
+            lastReason = json.message?.trim() || "chat_command_rejected";
+            continue;
+          }
+        } catch {
+          /* ok */
+        }
+        return { ok: true };
+      }
+      lastReason = `oauth_api_${res.status}`;
+      if (res.status !== 401 && res.status !== 403 && res.status !== 404) {
+        console.warn("[chat-cmd] bearer", url, res.status, raw.slice(0, 160));
+      }
+    } catch (err) {
+      lastReason = "oauth_network_error";
+      console.warn("[chat-cmd] bearer network", err);
+    }
   }
   return { ok: false, reason: lastReason };
 }
@@ -400,7 +603,7 @@ export async function subscribeToEvents(): Promise<void> {
 export async function deleteChatMessage(messageId: string): Promise<void> {
   if (!messageId) return;
   try {
-    const res = await authorizedFetch(`/chat/${encodeURIComponent(messageId)}`, { method: "DELETE" });
+    const res = await moderationFetch(`/chat/${encodeURIComponent(messageId)}`, { method: "DELETE" });
     if (res.status === 204 || res.ok) return;
     console.warn("[mod] delete failed", res.status, (await res.text()).slice(0, 180));
   } catch (err) {
@@ -495,7 +698,7 @@ export async function unpinChatMessage(channelSlug?: string): Promise<boolean> {
 /** Timeout in minutes, or omit duration / pass null for a permanent ban. */
 export async function removeBan(broadcasterUserId: number, userId: number): Promise<void> {
   try {
-    const res = await authorizedFetch("/moderation/bans", {
+    const res = await moderationFetch("/moderation/bans", {
       method: "DELETE",
       body: JSON.stringify({ broadcaster_user_id: broadcasterUserId, user_id: userId }),
     });
@@ -506,15 +709,21 @@ export async function removeBan(broadcasterUserId: number, userId: number): Prom
   }
 }
 
-/** Kick timeouts are minutes (min 1). Ban then unban after `ms` to fake a short mute. */
+/**
+ * Kick timeouts are minutes (min 1). For short fun mutes we ban 1 min then unban after `ms`.
+ * Always wait the full `ms` before unban so it isn't instant.
+ */
 export async function shortTimeout(
   broadcasterUserId: number,
   userId: number,
   ms: number,
   reason: string,
 ): Promise<void> {
+  const holdMs = Math.max(5_000, Math.floor(ms));
   await timeoutOrBan(broadcasterUserId, userId, 1, reason);
-  await new Promise((resolve) => setTimeout(resolve, Math.max(1500, ms)));
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, holdMs);
+  });
   await removeBan(broadcasterUserId, userId);
 }
 
@@ -531,7 +740,7 @@ export async function timeoutOrBan(
   };
   if (durationMinutes && durationMinutes >= 1) body.duration = Math.min(10080, Math.floor(durationMinutes));
   try {
-    const res = await authorizedFetch("/moderation/bans", {
+    const res = await moderationFetch("/moderation/bans", {
       method: "POST",
       body: JSON.stringify(body),
     });

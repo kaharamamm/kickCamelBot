@@ -2,9 +2,11 @@ import { extraChannelSlugs } from "./channelStore.js";
 import { generateRaw } from "./ai.js";
 import { clipChat } from "../kick/api.js";
 import { config } from "../config.js";
-import { roomSnapshot } from "./chatLog.js";
+import { lastBotQuotedText, lastBotSuggestedChange, recentDialogue } from "./chatLog.js";
+import { chatSummary } from "./chatMemory.js";
 import { extractChannelTarget, resolveRegisteredChannel } from "./remoteSay.js";
 import { extractQuoted, fold, isClearOrder, isSkipOrder } from "./slang.js";
+
 export type InterpretedOrder = {
   action:
     | "none"
@@ -21,11 +23,17 @@ export type InterpretedOrder = {
     | "clip"
     | "raid"
     | "pin"
-    | "unpin";
+    | "unpin"
+    | "discord_voice"
+    | "ban"
+    | "timeout"
+    | "emote";
   channel?: string;
   text?: string;
   on?: boolean | null;
   seconds?: number | null;
+  /** discord_voice: verbatim | riff | join | leave | repeat */
+  mode?: string;
 };
 
 const ACTIONS = new Set([
@@ -44,70 +52,66 @@ const ACTIONS = new Set([
   "raid",
   "pin",
   "unpin",
+  "discord_voice",
+  "ban",
+  "timeout",
+  "emote",
 ]);
 
-const ORDER_SYSTEM = `You interpret streamer orders to a Kick chat bot (CamelBot).
-Reply with ONE JSON object only. No markdown. No extra keys.
+const ORDER_SYSTEM = `You are the order-understanding brain for CamelBot (Kick + Discord).
+Given the streamer's latest message PLUS recent dialogue, decide if they want the bot to DO something, or just CHAT.
 
-Schema:
-{"action":"none|say|command|clear|skip|title|category|emoteonly|slow|followonly|subonly|clip|raid|pin|unpin","channel":"","text":"","on":null,"seconds":null}
+Reply with ONE JSON object only. No markdown.
 
-Critical rules:
-- Understand FULL CONTEXT in Turkish or English. Slang, typos, suffixes (kaiserin, kaiser'a) all count.
-- Verbs like sor/ask, yaz/write, söyle/say, der/söyle, git/go, katıl/join are ORDERS — never part of posted text.
-- action=say: "text" MUST be the exact natural message to appear in that channel's chat.
-  Compose it properly. Example: "yardıma ihtiyacı olup olmadığını sor" → text:"Yardıma ihtiyacın var mı?"
-  Example: "keller der misin" → text:"keller"
-  Example: "ask if they need help" → text:"Do you need any help?"
-- action=say: "channel" = target Kick slug/nick, or "home" for the streamer's own channel.
-  "benim kanal", "my channel", "kendi kanalım", "mcvckaharamamm" = HOME (streamer's channel), NOT an extra channel.
-- action=command: run a bot chat command. "text" = full command like "!commands" or "!ping".
-  Example: "!commands komutunu çalıştır" → action:command, text:"!commands"
-  Example: "run !ping" → action:command, text:"!ping"
-- Compound orders with "sonra/sonrada/and then": only interpret ONE step — caller splits them.
-- action=pin: post "text" in home channel (or registered extra if channel set), then pin that message.
-  Example: "Ben bir malım yazıp sabitle" → action:pin, text:"Ben bir malım"
-- Posting (say) works on HOME and on registered extra channels. Raid/host can use any Kick username.
-- action=unpin: remove pinned message from chat.
-- emoteonly/slow/followonly/subonly: on=true/false/null; seconds for timed modes.
-- If the streamer is chatting, joking, or not giving a bot command: action=none.
-- Use recent chat context for follow-ups (e.g. prior message mentioned kaiser's channel, now they say "yardıma ihtiyacı olup olmadığını sor").`;
+Schemas (pick one):
+- Single order: {"action":"none|say|command|clear|skip|title|category|emoteonly|slow|followonly|subonly|clip|raid|pin|unpin|discord_voice|ban|timeout|emote","channel":"","text":"","on":null,"seconds":null,"mode":""}
+- Multiple orders in ONE message: {"orders":[ {...}, {...} ]}
 
-/** True when regex alone is risky — prefer AI to compose the real message. */
-export function needsAiInterpretation(content: string): boolean {
-  const t = fold(content);
+How to think:
+1) Read recent dialogue.
+2) Decide intent of the LATEST message — not keyword matching alone.
+3) Short follow-ups like "tamam yap" mean APPLY a pending suggestion.
+4) Asking for ideas is CHAT → action=none.
+5) Only emit actions when they want them executed now.
+
+- emote: post Kick emotes into Kick chat. text = emote name if named. mode = happy|laugh|sad|angry|fear|surprise|disgust|trust|anticipation|hype|dance|love|cool|confused when they ask by mood ("go happy", "hype emoji", "dans emote", "kızgın emoji", "sad emotes").
+  NEVER use action=command for emoji/emote asks.
+
+Discord voice (discord_voice) — DC / Discord / "benim olduğum DC kanalı" / "dc ye gelip …":
+- mode=join → ONLY join (no speak). Use ONLY when they only asked to enter.
+- mode=leave → leave voice.
+- mode=verbatim + text = exact phrase to speak after joining ("… de", "say X").
+- mode=riff + text = invent spoken line that DOES the ask (e.g. "bana hali hatırımı sor" → text="halini hatırını sor", then speak a real nasılsın check-in — do NOT only join).
+- "gelip / girip / katıl" + anything to say or ask = join AND speak (verbatim or riff), NEVER mode=join alone.
+
+Kick stream: title/category/say/clear/skip/clip/raid/pin/unpin/emoteonly/slow/followonly/subonly/command/ban/timeout.
+
+Language: Turkish and English slang count.`;
+
+/**
+ * Cheap prefilter: should we spend an AI call to understand a possible order?
+ * Prefer "yes when talking to the bot" over keyword lists — understanding is the AI's job.
+ */
+export function shouldTryKingOrder(opts: {
+  content: string;
+  addressed: boolean;
+  continuing: boolean;
+}): boolean {
+  const t = opts.content.replace(/\s+/g, " ").trim();
   if (!t || t.length > 320) return false;
-  if (/(?:sabitle|pin(?:ned)?|sabit)/.test(t)) return true;
-  if (isClearOrder(content) || isSkipOrder(content)) return false;
-  if (/(?:sor|sorar|sorsana|sorsene|ask|question|merak|kontrol)/.test(t)) return true;
-  if (/(?:git|gidip|join|katil).{0,40}(?:kanal|channel)/.test(t)) return true;
-  if (resolveRegisteredChannel(content) && /(?:git|gidip|join|katil|sor|yaz|soyle|der|ve|and)/.test(t)) {
+  if (isClearOrder(t) || isSkipOrder(t) || t.startsWith(config.bot.prefix)) return true;
+  if (opts.addressed || opts.continuing) return true;
+  const f = fold(t);
+  if (/(?:raid|host|baskin|baslik|title|kategori|category|\boyun\b|\bgame\b|emote|emoji|slow|clip|klip|sabitle|unpin|\bban\b|timeout|sustur|discord|\bdc\b)/.test(f)) {
     return true;
   }
-  if (t.split(/\s+/).length >= 6) return true;
+  if (resolveRegisteredChannel(t) && /(?:git|gidip|yaz|sor|soyle|der|katil|join)/.test(f)) return true;
   return false;
 }
 
-export function mightBeKingOrder(content: string): boolean {
-  const t = content.replace(/\s+/g, " ").trim();
-  if (!t || t.length > 320) return false;
-  if (isClearOrder(t) || isSkipOrder(t)) return true;
-  const f = fold(t);
-  if (/(?:raid|host|baskin|raidle|hostla|title|baslik|category|kategori|emote|slow|yavas|follow|subonly|clip|klip)/.test(f)) {
-    return true;
-  }
-  if (/(?:sabitle|pin(?:ned)?|sabit)/.test(f)) return true;
-  if (/(?:git|gidip|join|katil|sor|yaz|soyle|der|desene|yazsana|sil|temizle|clear|skip|atla|gec|calistir|çalıştır|calistir|run|execute|komut)/.test(f)) {
-    return true;
-  }
-  if (resolveRegisteredChannel(t)) return true;
-  if (isHomeChannelRef(t)) return true;
-  if (/(?:@?camelbot|@?camel|\bbot\b)/.test(f)) {
-    return /(?:git|gidip|sor|yaz|soyle|der|desene|sil|clear|skip|raid|host|title|baslik|emote|slow|clip|katil|join|kanal|channel|temizle|atla|gec|sabitle|pin|sabit)/.test(
-      f,
-    );
-  }
-  return false;
+/** @deprecated use shouldTryKingOrder */
+export function mightBeKingOrder(content: string, _broadcasterUserId?: number): boolean {
+  return shouldTryKingOrder({ content, addressed: true, continuing: false });
 }
 
 export function isHomeChannelRef(text: string, homeSlug?: string): boolean {
@@ -121,27 +125,53 @@ export function isHomeChannelRef(text: string, homeSlug?: string): boolean {
 }
 
 export function splitCompoundOrder(content: string): string[] {
-  const parts: string[] = [];
-  let rest = content.replace(/\s+/g, " ").trim();
-  const splitRe =
-    /\s+(?:sonra(?:\s+(?:da|de)|da|de)?|and then|then|ve sonra|ardından)\s+(?=!\w+|(?:çalıştır|calistir|run|execute|git|gidip|clear|skip|atla|temizle|raid|host|sabitle|pin)\b)/i;
+  const t = content.replace(/\s+/g, " ").trim();
+  if (!t) return [];
 
-  for (;;) {
-    const m = rest.match(splitRe);
-    if (!m || m.index === undefined) {
-      if (rest) parts.push(rest);
-      break;
-    }
-    const head = rest.slice(0, m.index).trim();
-    if (!head) {
-      parts.push(rest);
-      break;
-    }
-    parts.push(head);
-    rest = rest.slice(m.index + m[0].length).trim();
+  // Match on folded text (Turkish ı/ş/ğ → ascii) but slice the original string.
+  const f = fold(t);
+
+  // Explicit sequencing: "sonra / and then / ardından"
+  const sequenced = splitOriginalByFoldedRegex(
+    t,
+    f,
+    /\s+(?:sonra(?:\s+(?:da|de)|da|de)?|and then|then|ve sonra|ardindan)\s+/gi,
+  );
+  if (sequenced.length > 1) return sequenced;
+
+  // Parallel asks: "… yap, yayın başlığını da …" / "… and also set title …"
+  const titleOrGame =
+    "(?:(?:yayin(?:in)?|stream(?:in)?)\\s+)?(?:baslig(?:i(?:ni|n)?|ini)?|title|kategori|category|oyun(?:u|un)?|game)";
+  const afterJoin = `(?:(?:(?:set|change|update|make|put|koy|yap|degistir|cevir)\\s+(?:the\\s+|bir\\s+)?)?${titleOrGame}|emote|slow|raid|host)`;
+  const parallel = splitOriginalByFoldedRegex(
+    t,
+    f,
+    new RegExp(`\\s*,\\s*(?=${afterJoin}\\b)|(?:\\s+(?:ve|and|also|plus)\\s+)(?=${afterJoin}\\b)`, "gi"),
+  );
+  if (parallel.length > 1) return parallel;
+
+  return [t];
+}
+
+/** Split `original` using match indices found on length-preserving `folded`. */
+function splitOriginalByFoldedRegex(original: string, folded: string, re: RegExp): string[] {
+  const matches: Array<{ index: number; len: number }> = [];
+  let m: RegExpExecArray | null;
+  const global = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`);
+  while ((m = global.exec(folded)) !== null) {
+    matches.push({ index: m.index, len: m[0].length });
   }
-
-  return parts.length > 0 ? parts : [content.trim()];
+  if (!matches.length) return [original];
+  const parts: string[] = [];
+  let last = 0;
+  for (const hit of matches) {
+    const head = original.slice(last, hit.index).trim();
+    if (head) parts.push(head);
+    last = hit.index + hit.len;
+  }
+  const tail = original.slice(last).trim();
+  if (tail) parts.push(tail);
+  return parts.length > 1 ? parts : [original];
 }
 
 export function parseCommandInvoke(content: string): InterpretedOrder | null {
@@ -221,51 +251,110 @@ export async function interpretOrder(
   broadcasterUserId?: number,
   homeSlug?: string,
 ): Promise<InterpretedOrder | null> {
+  const list = await interpretOrders(content, broadcasterUserId, homeSlug);
+  return list[0] ?? null;
+}
+
+/** Understand one or many executable orders from a single streamer message. */
+export async function interpretOrders(
+  content: string,
+  broadcasterUserId?: number,
+  homeSlug?: string,
+): Promise<InterpretedOrder[]> {
   const channels = extraChannelSlugs();
   const homeHint = homeSlug
-    ? `Home streamer channel: ${homeSlug} — "benim kanal", "my channel", "kendi kanalım" = this channel.`
+    ? `Home streamer channel: ${homeSlug} — "benim kanal" / "my channel" = this channel.`
     : 'Home = streamer\'s own channel ("benim kanal" / "my channel").';
   const channelHint =
     channels.length > 0
       ? `${homeHint} Registered extra channels: ${channels.join(", ")}`
       : `${homeHint} No extra channels registered yet.`;
-  const context =
-    broadcasterUserId && broadcasterUserId > 0
-      ? roomSnapshot(broadcasterUserId, undefined, 6)
-      : "";
-  const contextHint = context ? `Recent chat (for follow-ups like "sor that there"):\n${context}` : "";
 
-  const examples = [
-    'Order: "camel git kaiserin kanalına ve yardıma ihtiyacı olup olmadığını sor" → {"action":"say","channel":"kaiserdoto","text":"Yardıma ihtiyacın var mı?","on":null,"seconds":null}',
-    'Order: "kaiserin kanala gidip keller der misin" → {"action":"say","channel":"kaiserdoto","text":"keller","on":null,"seconds":null}',
-    'Order: "bot chati silsene" → {"action":"clear","channel":"","text":"","on":null,"seconds":null}',
-    'Order: "şarkıyı geç" → {"action":"skip","channel":"","text":"","on":null,"seconds":null}',
-    'Order: "benim kanala gidip bir selam kralım yaz" → {"action":"say","channel":"home","text":"selam kralım","on":null,"seconds":null}',
-    'Order: "benim kanala naber lan yarram yaz" → {"action":"say","channel":"home","text":"naber lan yarram","on":null,"seconds":null}',
-    'Order: "!commands komutunu çalıştır" → {"action":"command","channel":"","text":"!commands","on":null,"seconds":null}',
-    'Order: "camel \\"Ben bir malım\\" yazıp sabitlesene o mesajını" → {"action":"pin","channel":"","text":"Ben bir malım","on":null,"seconds":null}',
-    'Order: "how are you camel" → {"action":"none","channel":"","text":"","on":null,"seconds":null}',
-  ].join("\n");
+  const dialogue =
+    broadcasterUserId && broadcasterUserId > 0 ? recentDialogue(broadcasterUserId, 10) : "";
+  const roomMem =
+    broadcasterUserId && broadcasterUserId > 0 ? chatSummary(broadcasterUserId) : "";
+  const pendingQuote =
+    broadcasterUserId && broadcasterUserId > 0 ? lastBotQuotedText(broadcasterUserId) : null;
+  const pendingKind =
+    broadcasterUserId && broadcasterUserId > 0 ? lastBotSuggestedChange(broadcasterUserId) : null;
+
+  const pendingHint = pendingQuote
+    ? `Pending bot suggestion (${pendingKind ?? "unknown"}): "${pendingQuote}"\nIf the latest message is approving/applying that suggestion, emit action=${pendingKind === "category" ? "category" : "title"} with text set to that exact suggestion (or "__invent__" only if they ask you to invent something new).`
+    : "No pending quoted suggestion.";
+
+  const dialogueHint = dialogue
+    ? `Last 10 chat lines (oldest→newest):\n${dialogue}`
+    : "Last 10 chat lines: (none)";
+  const roomHint = roomMem
+    ? `Room summary (what chat has been talking about): ${roomMem}`
+    : "Room summary: (none yet)";
 
   const raw = await generateRaw(
-    [`Streamer order:\n${content.slice(0, 400)}`, channelHint, contextHint, examples].filter(Boolean).join("\n\n"),
+    [
+      `Latest streamer message:\n${content.slice(0, 500)}`,
+      dialogueHint,
+      roomHint,
+      pendingHint,
+      channelHint,
+      'If this message has multiple asks, reply with {"orders":[...]} covering ALL of them.',
+    ].join("\n\n"),
     ORDER_SYSTEM,
-    { standalone: true, timeoutMs: 12_000, tokens: 280, temperature: 0 },
+    { standalone: true, timeoutMs: 90_000, tokens: 480, temperature: 0 },
   );
-  return parseOrderJson(raw);
+  return parseOrdersJson(raw);
 }
 
-function parseOrderJson(raw: string | null): InterpretedOrder | null {
-  if (!raw) return null;
+function asOrder(row: {
+  action?: string;
+  channel?: string;
+  text?: string;
+  on?: boolean | null;
+  seconds?: number | null;
+  mode?: string;
+}): InterpretedOrder | null {
+  const action = row.action === "host" ? "raid" : row.action;
+  if (!action || !ACTIONS.has(action)) return null;
+  if (action === "none") return { action: "none" };
+  return {
+    action: action as InterpretedOrder["action"],
+    channel: row.channel,
+    text: row.text,
+    on: row.on ?? null,
+    seconds: row.seconds ?? null,
+    mode: row.mode,
+  };
+}
+
+function parseOrdersJson(raw: string | null): InterpretedOrder[] {
+  if (!raw) return [];
   const json = raw.match(/\{[\s\S]*\}/)?.[0];
-  if (!json) return null;
+  if (!json) return [];
   try {
-    const parsed = JSON.parse(json) as { action?: string; channel?: string; text?: string; on?: boolean | null; seconds?: number | null };
-    const action = parsed.action === "host" ? "raid" : parsed.action;
-    if (!action || !ACTIONS.has(action)) return null;
-    return { ...parsed, action: action as InterpretedOrder["action"] };
+    const parsed = JSON.parse(json) as {
+      action?: string;
+      channel?: string;
+      text?: string;
+      on?: boolean | null;
+      seconds?: number | null;
+      orders?: Array<{
+        action?: string;
+        channel?: string;
+        text?: string;
+        on?: boolean | null;
+        seconds?: number | null;
+      }>;
+    };
+
+    if (Array.isArray(parsed.orders)) {
+      return parsed.orders.map(asOrder).filter((o): o is InterpretedOrder => Boolean(o && o.action !== "none"));
+    }
+
+    const one = asOrder(parsed);
+    if (!one || one.action === "none") return one?.action === "none" ? [{ action: "none" }] : [];
+    return [one];
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -281,6 +370,7 @@ export function resolveSayChannel(order: InterpretedOrder, original: string, hom
     null
   );
 }
+
 export function resolveRaidTarget(order: InterpretedOrder, original: string): string | null {
   return extractChannelTarget(`${order.channel ?? ""} ${order.text ?? ""} ${original}`);
 }

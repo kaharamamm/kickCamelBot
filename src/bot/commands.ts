@@ -499,7 +499,7 @@ async function handleClear(): Promise<string> {
   const result = await clearChat();
   return result.ok
     ? "Chat cleared."
-    : "Kick won't run /clear from a bot — type /clear in chat or use the Kick dashboard.";
+    : `Couldn't clear chat (${result.reason}). Paste fresh Kick site cookies on the dashboard (session_token).`;
 }
 
 async function handleClip(args: string): Promise<string> {

@@ -70,7 +70,13 @@ export function fillTicket(ticket: Ticket, ready: Promise<string | null | undefi
   if (ticket.replyTo && !claimReplyTo(ticket.replyTo)) {
     ticket.ready = Promise.resolve(undefined);
   } else {
-    ticket.ready = ready;
+    ticket.ready = ready.then(
+      (line) => line,
+      (err) => {
+        console.warn("[chat] send-queue job failed", err);
+        return null;
+      },
+    );
   }
   ticket.settled = true;
   void pump();

@@ -1,4 +1,15 @@
 import "dotenv/config";
+import { config as loadDotenv } from "dotenv";
+import { resolve } from "node:path";
+
+/** Re-read .env so Dashboard → AI Refresh picks up keys without a full process restart. */
+export function reloadEnv(): void {
+  loadDotenv({ path: resolve(process.cwd(), ".env"), override: true });
+}
+
+export function envKey(name: string): string {
+  return process.env[name]?.trim() ?? "";
+}
 
 function required(name: string): string {
   const value = process.env[name]?.trim();
@@ -45,8 +56,27 @@ export const config = {
       .filter(Boolean),
   },
   gemini: {
-    apiKey: process.env.GEMINI_API_KEY?.trim() ?? "",
-    model: optional("GEMINI_MODEL", "gemini-3.5-flash-lite"),
+    get apiKey() {
+      return envKey("GEMINI_API_KEY");
+    },
+    get model() {
+      return envKey("GEMINI_MODEL") || "gemini-3.5-flash-lite";
+    },
+  },
+  openai: {
+    get apiKey() {
+      return envKey("OPENAI_API_KEY");
+    },
+  },
+  groq: {
+    get apiKey() {
+      return envKey("GROQ_API_KEY");
+    },
+  },
+  openrouter: {
+    get apiKey() {
+      return envKey("OPENROUTER_API_KEY");
+    },
   },
   discord: {
     enabled: Boolean(process.env.DISCORD_BOT_TOKEN?.trim()),
@@ -55,10 +85,7 @@ export const config = {
     guildId: process.env.DISCORD_GUILD_ID?.trim() ?? "",
     channelId: process.env.DISCORD_CHANNEL_ID?.trim() ?? "",
     postChannelId: process.env.DISCORD_POST_CHANNEL_ID?.trim() ?? "",
-    alwaysReplyUserIds: (process.env.DISCORD_ALWAYS_REPLY_USER_IDS ?? "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean),
+    alwaysReplyUserIds: [] as string[],
   },
 };
 

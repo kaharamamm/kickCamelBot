@@ -1,7 +1,20 @@
+import { PermissionFlagsBits } from "discord.js";
 import { config } from "../config.js";
 
-/** View Channels + Send Messages + Read Message History */
-export const DISCORD_INVITE_PERMISSIONS = "68608";
+const STAFF_AND_VOICE =
+  PermissionFlagsBits.ViewChannel |
+  PermissionFlagsBits.SendMessages |
+  PermissionFlagsBits.ReadMessageHistory |
+  PermissionFlagsBits.Connect |
+  PermissionFlagsBits.Speak |
+  PermissionFlagsBits.MoveMembers |
+  PermissionFlagsBits.MuteMembers |
+  PermissionFlagsBits.DeafenMembers |
+  PermissionFlagsBits.KickMembers |
+  PermissionFlagsBits.BanMembers |
+  PermissionFlagsBits.ModerateMembers;
+
+export const DISCORD_INVITE_PERMISSIONS = String(STAFF_AND_VOICE);
 
 export function discordInviteUrl(clientId?: string): string | null {
   const id = (clientId ?? config.discord.clientId).trim();

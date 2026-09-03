@@ -1,3 +1,5 @@
+import { CHAT_WINDOW, noteRoomLine } from "./chatMemory.js";
+
 export type LogLine = {
   at: number;
   user: string;
@@ -25,6 +27,18 @@ export function rememberLine(broadcasterId: number, line: LogLine): void {
   if (drop) list.splice(0, drop);
   if (list.length > MAX) list.splice(0, list.length - MAX);
   logs.set(broadcasterId, list);
+  noteRoomLine(broadcasterId);
+}
+
+export function lastChatLines(broadcasterId: number, limit = CHAT_WINDOW): LogLine[] {
+  return (logs.get(broadcasterId) ?? []).slice(-limit);
+}
+
+/** Last N chat lines, oldest→newest, including CamelBot. */
+export function formatLastChat(broadcasterId: number, limit = CHAT_WINDOW): string {
+  const lines = lastChatLines(broadcasterId, limit);
+  if (!lines.length) return "";
+  return lines.map((l) => `${l.bot ? "CamelBot" : l.user}: ${l.text}`).join("\n");
 }
 
 export function recentLines(broadcasterId: number, ms: number): LogLine[] {
@@ -46,6 +60,11 @@ export function roomSnapshot(broadcasterId: number, skipUserId?: number, limit =
     .slice(-limit);
   if (lines.length === 0) return "";
   return lines.map((l) => `${l.user}: ${l.text.slice(0, 72)}`).join(" · ");
+}
+
+/** Recent back-and-forth including CamelBot lines — for order follow-ups. */
+export function recentDialogue(broadcasterId: number, limit = CHAT_WINDOW): string {
+  return formatLastChat(broadcasterId, limit);
 }
 
 export function lastActivity(broadcasterId: number): number {
@@ -116,4 +135,49 @@ function dominantToken(line: LogLine): string | null {
   if (compact.length === 0 || compact.length > 24) return null;
   if (compact.startsWith("!")) return null;
   return compact;
+}
+
+/** Last CamelBot line that contains a "quoted" title/suggestion. */
+export function lastBotQuotedText(broadcasterId: number, maxAgeMs = 5 * 60_000): string | null {
+  const list = logs.get(broadcasterId) ?? [];
+  const since = Date.now() - maxAgeMs;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const row = list[i];
+    if (!row?.bot) continue;
+    if (row.at < since) break;
+    const quoted =
+      row.text.match(/["“”]([^"“”]{3,100})["“”]/)?.[1]?.trim() ||
+      row.text.match(/['‘’]([^'‘’]{3,100})['‘’]/)?.[1]?.trim();
+    if (quoted) return quoted;
+  }
+  return null;
+}
+
+/** True when the last bot message looks like a title/category suggestion. */
+export function lastBotSuggestedChange(broadcasterId: number, maxAgeMs = 5 * 60_000): "title" | "category" | null {
+  const list = logs.get(broadcasterId) ?? [];
+  const since = Date.now() - maxAgeMs;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const row = list[i];
+    if (!row?.bot) continue;
+    if (row.at < since) break;
+    const t = row.text.toLowerCase();
+    const hasQuote = /["“”'‘’][^"“”'‘’]{3,}["“”'‘’]/.test(row.text);
+    if (!hasQuote) continue;
+    if (/(?:basl[iı]k|title|yay[iı]n\s*basl)/i.test(t) || /falan yapal[iı]m basl|basl[iı]g[iı]|nas[iı]l fikir/i.test(t)) {
+      return "title";
+    }
+    if (/(?:kategori|category|oyun|game)/i.test(t)) return "category";
+    // Quoted suggestion with no explicit word — still treat as title (most common)
+    return "title";
+  }
+  return null;
+}
+
+export function lastBotLine(broadcasterId: number): string | null {
+  const list = logs.get(broadcasterId) ?? [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i]?.bot) return list[i]!.text;
+  }
+  return null;
 }

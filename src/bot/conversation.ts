@@ -1,15 +1,16 @@
 import { config } from "../config.js";
 import { isOwnBotName } from "./bots.js";
 
-const FOLLOW_MS = 3 * 60_000;
-const MAX_THREADS = 60;
+/** Continue a bot conversation for 15s after the bot's last reply (not the user's message). */
+const FOLLOW_MS = 15_000;
+const MAX_THREADS = 80;
 
 type Thread = { at: number };
 
 const threads = new Map<string, Thread>();
 
-function threadKey(broadcasterUserId: number, userId: number): string {
-  return `${broadcasterUserId}:${userId}`;
+function threadKey(roomId: string | number, userId: string | number): string {
+  return `${roomId}:${userId}`;
 }
 
 function pruneThreads(now = Date.now()): void {
@@ -21,20 +22,25 @@ function pruneThreads(now = Date.now()): void {
   for (const [key] of oldest.slice(0, threads.size - MAX_THREADS)) threads.delete(key);
 }
 
-export function rememberThread(broadcasterUserId: number, userId: number): void {
+/**
+ * Start/refresh the 15s untagged follow-up window.
+ * Call ONLY after the bot has actually replied (chat text, voice, or silent order done) —
+ * never when the user message arrives or while the bot is still thinking.
+ */
+export function rememberThread(roomId: string | number, userId: string | number): void {
   pruneThreads();
-  threads.set(threadKey(broadcasterUserId, userId), { at: Date.now() });
+  threads.set(threadKey(roomId, userId), { at: Date.now() });
 }
 
-export function dropThread(broadcasterUserId: number, userId: number): void {
-  threads.delete(threadKey(broadcasterUserId, userId));
+export function dropThread(roomId: string | number, userId: string | number): void {
+  threads.delete(threadKey(roomId, userId));
 }
 
-export function inThread(broadcasterUserId: number, userId: number): boolean {
-  const row = threads.get(threadKey(broadcasterUserId, userId));
+export function inThread(roomId: string | number, userId: string | number): boolean {
+  const row = threads.get(threadKey(roomId, userId));
   if (!row) return false;
   if (Date.now() - row.at > FOLLOW_MS) {
-    threads.delete(threadKey(broadcasterUserId, userId));
+    threads.delete(threadKey(roomId, userId));
     return false;
   }
   return true;
@@ -62,16 +68,16 @@ export function looksLikeFollowUp(content: string, replyToName?: string): boolea
 }
 
 export function stillTalkingToUs(
-  broadcasterUserId: number,
-  userId: number,
+  roomId: string | number,
+  userId: string | number,
   content: string,
   replyToName?: string,
   replyToUs = false,
 ): boolean {
   if (replyToUs || isOwnBotName(replyToName)) return true;
-  if (!inThread(broadcasterUserId, userId)) return false;
+  if (!inThread(roomId, userId)) return false;
   if (!looksLikeFollowUp(content, replyToName)) {
-    dropThread(broadcasterUserId, userId);
+    dropThread(roomId, userId);
     return false;
   }
   return true;

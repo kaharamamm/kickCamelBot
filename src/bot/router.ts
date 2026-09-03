@@ -1,12 +1,12 @@
 import { loadBotTokens } from "../auth/tokenStore.js";
 import { config } from "../config.js";
 import { getMe, shortTimeout } from "../kick/api.js";
-import { calledTheBot, calledTheMods, generateLine, replyWithAi, shouldTalkToAi } from "./ai.js";
+import { calledTheBot, calledTheMods, generateLine, replyWithAi, shouldTalkToAi, asksAboutStreamer } from "./ai.js";
 import { isChatBot, isOwnBot, isOwnBotName, talkingToOtherBot } from "./bots.js";
 import { rememberLine } from "./chatLog.js";
 import { handleCommand, isDotaChatCommand } from "./commands.js";
 import { answerDotaAsk, classifyDotaAsk, warmupDota } from "./dota.js";
-import { maybeJoinEmoteSpam } from "./engagement.js";
+import { maybeJoinEmoteSpam, maybeChaosEmoteSpam } from "./engagement.js";
 import { ensureWarning, looksLikeBotInsult, noteHeat, timeoutRoast } from "./heat.js";
 import { detectLang, isGreeting, otherLangReply } from "./lang.js";
 import { channelLiveStatus } from "./liveState.js";
@@ -20,10 +20,12 @@ import { isStaff, isTheKing, isVerifiedStreamer } from "./permissions.js";
 import { answerRecap, classifyRecapAsk, noteChat, noteDonation, noteFollow, noteRaid, noteStreamContext, noteSub, noteTalkedToUs } from "./recap.js";
 import { currentPoll, tryBareVote } from "./polls.js";
 import { fillTicket, skipTicket, say, takeTicket, wasBotMessage, wasBotText } from "./outbox.js";
+import { enqueueWork } from "./workQueue.js";
 import { tryAnswerQuiz } from "./quiz.js";
 import { thanksOnce } from "./thanks.js";
 import { markChat, takeVerifiedFirst } from "./viewers.js";
-import { mightBeKingOrder, runKingOrder } from "./kingOrder.js";
+import { shouldTryKingOrder, runKingOrder } from "./kingOrder.js";
+import { rememberThread, stillTalkingToUs } from "./conversation.js";
 import { allowWebSearch, answerWebSearch, classifyWebSearch } from "./webSearch.js";
 import { yenimahalleWeather } from "./weather.js";
 import type { ChatMessageEvent, IncomingChat, KickUser } from "../types.js";
@@ -32,6 +34,11 @@ let botUser: KickUser | undefined;
 const handledChat = new Set<string>();
 
 export async function handleChatMessage(event: ChatMessageEvent): Promise<void> {
+  const key = `kick:${event.broadcaster.user_id}`;
+  return enqueueWork(key, () => processChatMessage(event));
+}
+
+async function processChatMessage(event: ChatMessageEvent): Promise<void> {
   const raw = event.content ?? "";
   const incoming: IncomingChat = {
     messageId: event.message_id,
@@ -82,9 +89,24 @@ export async function handleChatMessage(event: ChatMessageEvent): Promise<void> 
 
   const ticket = takeTicket(incoming.broadcaster.user_id, incoming.messageId);
   let handed = false;
+  let pending: Promise<string | null | undefined> | undefined;
   const deliver = (ready: Promise<string | null | undefined>) => {
     handed = true;
-    fillTicket(ticket, ready);
+    const tracked = ready.then(
+      (line) => {
+        // Any real reply (chat OR order ack/fail) keeps the conversation thread alive.
+        if (line?.trim()) {
+          rememberThread(incoming.broadcaster.user_id, incoming.sender.user_id);
+        }
+        return line;
+      },
+      (err) => {
+        console.warn("[chat] reply job failed", err);
+        return null;
+      },
+    );
+    pending = tracked;
+    fillTicket(ticket, tracked);
   };
 
   try {
@@ -135,6 +157,7 @@ export async function handleChatMessage(event: ChatMessageEvent): Promise<void> 
       if (!fromKing && (await tryAnswerQuiz(incoming))) return;
       const pingedBot = shouldTalkToAi(incoming.content) || calledTheBot(incoming.content);
       if (!fromKing && !pingedBot && (await maybeJoinEmoteSpam(incoming.broadcaster.user_id))) return;
+      if (!fromKing && !pingedBot && (await maybeChaosEmoteSpam(incoming.broadcaster.user_id))) return;
     }
 
     if (!incoming.content) return;
@@ -171,7 +194,15 @@ export async function handleChatMessage(event: ChatMessageEvent): Promise<void> 
     const calledBot = calledTheBot(incoming.content);
     const calledMods = calledTheMods(incoming.content);
     const parentWasBot = isReplyToUs(incoming);
-    const addressed = mentioned || parentWasBot || calledBot || calledMods;
+    const continuing = stillTalkingToUs(
+      incoming.broadcaster.user_id,
+      incoming.sender.user_id,
+      incoming.content,
+      incoming.replyToName,
+      parentWasBot,
+    );
+    const addressed = mentioned || parentWasBot || calledBot || calledMods || continuing;
+    const fromStaff = isStaff(incoming.sender, incoming.broadcaster);
 
     if (!status.chatterOk && !addressed) return;
 
@@ -181,25 +212,52 @@ export async function handleChatMessage(event: ChatMessageEvent): Promise<void> 
       return;
     }
 
-    if (fromKing) {
-      if (mightBeKingOrder(incoming.content)) {
-        const result = await runKingOrder(incoming.content, lang, incoming.broadcaster.user_id);
-        if (result !== undefined) {
-          if (result) deliver(Promise.resolve(result));
+    if (fromKing || fromStaff) {
+      const tryOrder = shouldTryKingOrder({
+        content: incoming.content,
+        addressed,
+        continuing,
+      });
+      if (tryOrder) {
+        if (fromStaff && !fromKing && Math.random() < 1 / 100_000) {
+          deliver(
+            Promise.resolve(
+              lang === "en"
+                ? "Not now. I'm in a mood. Ask the king or try later."
+                : "Şimdi olmaz. Keyfim yok. Krala sor ya da sonra dene.",
+            ),
+          );
           return;
         }
+        try {
+          const result = await runKingOrder(incoming.content, lang, incoming.broadcaster.user_id);
+          if (result !== undefined) {
+            if (result) deliver(Promise.resolve(result));
+            else {
+              // Silent order success (title change, Discord join+speak, etc.) — window starts now.
+              rememberThread(incoming.broadcaster.user_id, incoming.sender.user_id);
+            }
+            return;
+          }
+          // Understood as chat — fall through to normal reply.
+        } catch (err) {
+          console.warn("[order] failed", err);
+          // Don't go silent — answer in chat after an order crash.
+        }
       }
-      if (addressed) {
+      if (fromKing && addressed) {
         const self = selfAskReply(incoming.content, lang);
         if (self) {
           deliver(Promise.resolve(self));
           return;
         }
       }
-      const kingSearch = classifyWebSearch(incoming.content);
-      if (kingSearch) {
-        deliver(answerWebSearch(kingSearch, lang, incoming.content));
-        return;
+      if (fromKing) {
+        const kingSearch = classifyWebSearch(incoming.content);
+        if (kingSearch) {
+          deliver(answerWebSearch(kingSearch, lang, incoming.content));
+          return;
+        }
       }
     }
 
@@ -215,14 +273,14 @@ export async function handleChatMessage(event: ChatMessageEvent): Promise<void> 
         await shortTimeout(
           incoming.broadcaster.user_id,
           incoming.sender.user_id,
-          3000,
+          5000,
           "fun timeout",
         );
         logMod({
           action: "timeout",
           username: incoming.sender.username,
           userId: incoming.sender.user_id,
-          reason: "fun 3s timeout",
+          reason: "fun 5s timeout",
           detail: "warned, then kept going",
           message: incoming.content,
         });
@@ -267,12 +325,13 @@ export async function handleChatMessage(event: ChatMessageEvent): Promise<void> 
         parentWasBot,
         streamTitle,
         game,
-        force: calledBot || calledMods || parentWasBot,
+        force: calledBot || calledMods || parentWasBot || continuing,
+        continuing,
         lang,
         respectful: verifiedFirst && !fromKing,
         calledBot: calledBot && !fromKing && !insulted,
         calledMods,
-        allowKing: fromKing || /\b(mcvck|kaharamamm|kral[ıi]m)\b/i.test(incoming.content),
+        allowKing: fromKing || asksAboutStreamer(incoming.content),
         heatWarn: heatWarn && !fromKing,
         fromKing,
         kingMood: fromKing
@@ -292,12 +351,14 @@ export async function handleChatMessage(event: ChatMessageEvent): Promise<void> 
         rememberPerson(incoming.sender);
         noteExchange(incoming.sender.user_id, incoming.sender.username, incoming.content, line);
         noteTalkedToUs(incoming.sender.username, incoming.sender.user_id, incoming.content || raw);
+        rememberThread(incoming.broadcaster.user_id, incoming.sender.user_id);
         return line;
       }),
     );
   } finally {
     if (!handed) skipTicket(ticket);
   }
+  if (pending) await pending;
 }
 
 const lastBotBully = new Map<number, number>();

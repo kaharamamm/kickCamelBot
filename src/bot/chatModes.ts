@@ -61,9 +61,9 @@ export async function setSubOnly(on: boolean): Promise<boolean> {
   return sendModSlash(on ? "/subonly on" : "/subonly off").then((r) => r.ok);
 }
 
-/** Kick only runs /clear from the browser — OAuth and pasted cookies cannot do it from a server. */
+/** Clear chat via Kick site session (streamer account) — OAuth bots cannot /clear. */
 export async function clearChat(): Promise<ModSlashResult> {
-  return { ok: false, reason: "kick_no_server_clear" };
+  return sendModSlash("/clear");
 }
 
 export async function createClip(opts?: { seconds?: number; title?: string }): Promise<boolean> {
@@ -235,7 +235,7 @@ function clipTitle(text: string): string {
 }
 
 function fail(what: string, reason?: string): string {
-  const base = `Couldn't change ${what}. CamelBot needs mod rights (and Kick slash commands) on this channel.`;
+  const base = `Couldn't change ${what}. Needs a fresh Kick site login (session_token) on the dashboard.`;
   return reason ? `${base.slice(0, -1)} (${reason}).` : base;
 }
 

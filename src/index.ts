@@ -1,5 +1,6 @@
 import { claimInstance } from "./bot/instanceLock.js";
 import { lanUrls } from "./bot/lan.js";
+import { anyAiConfigured } from "./bot/aiProviders.js";
 import { config } from "./config.js";
 import { bootIntegrations, createServer } from "./server.js";
 
@@ -15,8 +16,8 @@ const server = app.listen(config.port, () => {
   if (!config.kick.clientSecret) {
     console.warn("KICK_CLIENT_SECRET is empty. Copy it from Kick Developer settings into .env");
   }
-  if (!config.gemini.apiKey) {
-    console.warn("GEMINI_API_KEY is empty. Commands work; @CamelBot AI replies are off until you add a Google AI Studio key.");
+  if (!anyAiConfigured()) {
+    console.warn("No AI keys set. Add GEMINI_API_KEY, GROQ_API_KEY, OPENAI_API_KEY, and/or OPENROUTER_API_KEY. Commands still work.");
   }
   if (config.discord.enabled) {
     console.log("[discord] token set — will connect on boot");

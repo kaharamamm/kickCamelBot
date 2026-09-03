@@ -72,6 +72,17 @@ export function parseXsrfToken(cookie: string): string | undefined {
   }
 }
 
+/** Kick site Sanctum token — works as Bearer for chat-commands / chatroom settings (OAuth does not). */
+export function parseSessionToken(cookie: string): string | undefined {
+  const match = cookie.match(/(?:^|;\s*)session_token=([^;]+)/i);
+  if (!match?.[1]) return undefined;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+}
+
 function kickSiteDomain(domain: string): boolean {
   const d = domain.toLowerCase();
   return d === "kick.com" || d === ".kick.com";

@@ -20,14 +20,24 @@ import { getMyChannel, subscribeToEvents } from "./kick/api.js";
 import { ChannelNotFoundError, lookupPublicChannel } from "./kick/publicChannel.js";
 import { liveChatArmed, liveChatChannels, liveChatListening, liveChatStatus, startLiveChat } from "./kick/liveChat.js";
 import { adminChatHistory, clearAdminChat, processAdminChat } from "./bot/adminChat.js";
-import { applyDiscordRouting, discordStatus, startDiscord } from "./discord/client.js";
+import {
+  activityHistory,
+  activitySince,
+  clearActivityLog,
+  subscribeActivity,
+} from "./bot/activityLog.js";
+import { applyDiscordRouting, discordStatus, getDiscordClient, resolveDiscordDisplayName, startDiscord } from "./discord/client.js";
 import { discordInviteUrl } from "./discord/invite.js";
-import { parseAlwaysReplyJson, parseRoutesJson, type DiscordRouting } from "./discord/settings.js";
+import { parseAlwaysReplyJson, parseRoutesJson, routesFromUnknown, alwaysReplyFromUnknown, type DiscordRouting } from "./discord/settings.js";
+import { synthesizeSpeech } from "./discord/speech.js";
+import { joinVoiceByIds, leaveVoice, speakInGuild } from "./discord/voice.js";
+import { saveVoicePrefs, type TtsVoiceId } from "./discord/voicePrefs.js";
 import { isPrivateDashboardHost } from "./bot/lan.js";
 import { setCommandTimer } from "./bot/commandTimers.js";
 import { RESERVED_COMMANDS } from "./bot/commands.js";
 import { parseDotaAccount } from "./bot/dota.js";
-import { getSettings, saveSettings, type AiLength } from "./bot/settings.js";
+import { getSettings, saveSettings, type AiLength, type AiProviderId } from "./bot/settings.js";
+import { anyAiConfigured } from "./bot/aiProviders.js";
 import { restartTimedCommands } from "./bot/timed.js";
 import { addTimedCommand, removeTimedCommand, updateTimedMinutes } from "./bot/timedStore.js";
 import { parseTimerMinutes } from "./bot/timerPreset.js";
@@ -77,7 +87,7 @@ export function createServer() {
         bot: config.bot.name,
         authorized: Boolean(tokens?.accessToken),
         botAccount: bot?.user?.name ?? null,
-        ai: Boolean(config.gemini.apiKey),
+        ai: anyAiConfigured(),
         lastWebhook: webhookLog[0] ?? null,
         webhookHits: webhookLog.length,
         liveChat: liveChatStatus,
@@ -119,7 +129,61 @@ export function createServer() {
   app.get("/recap", (req, res) => sendDash(req, res, "recap"));
   app.get("/ai", (req, res) => sendDash(req, res, "ai"));
   app.get("/admin", (req, res) => sendDash(req, res, "admin"));
+  app.get("/terminal", (req, res) => sendDash(req, res, "terminal"));
   app.get("/discord", (req, res) => sendDash(req, res, "discord"));
+  app.get("/emotes", (req, res) => sendDash(req, res, "emotes"));
+
+  app.post("/emotes", express.urlencoded({ extended: false }), (req, res) => {
+    void (async () => {
+      const { EMOTE_MOODS, saveEmoteMoodsFromUi } = await import("./bot/kickEmotes.js");
+      type EmoteMood = (typeof EMOTE_MOODS)[number];
+      const assignments: Record<string, EmoteMood> = {};
+      for (const [key, value] of Object.entries(req.body ?? {})) {
+        if (!key.startsWith("mood_")) continue;
+        const name = key.slice("mood_".length);
+        const mood = String(value);
+        if ((EMOTE_MOODS as string[]).includes(mood)) assignments[name] = mood as EmoteMood;
+      }
+      const changed = saveEmoteMoodsFromUi(assignments);
+      res.redirect(
+        `/emotes?notice=${encodeURIComponent(
+          changed
+            ? `Saved ${changed} mood override${changed === 1 ? "" : "s"}.`
+            : "All moods match defaults — overrides cleared.",
+        )}`,
+      );
+    })().catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.redirect(`/emotes?error=${encodeURIComponent(msg)}`);
+    });
+  });
+
+  app.get("/terminal/log", (req, res) => {
+    const after = stringQuery(req.query.after);
+    res.type("json").json({ lines: after ? activitySince(after) : activityHistory() });
+  });
+
+  app.delete("/terminal/log", (_req, res) => {
+    res.json({ ok: true, lines: clearActivityLog() });
+  });
+
+  app.get("/terminal/stream", (req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+    for (const row of activityHistory(80)) {
+      res.write(`data: ${JSON.stringify(row)}\n\n`);
+    }
+    const unsub = subscribeActivity((entry) => {
+      res.write(`data: ${JSON.stringify(entry)}\n\n`);
+    });
+    const ping = setInterval(() => res.write(": ping\n\n"), 15000);
+    req.on("close", () => {
+      clearInterval(ping);
+      unsub();
+    });
+  });
 
   app.get("/discord/invite", (_req, res) => {
     const url = discordInviteUrl();
@@ -132,23 +196,144 @@ export function createServer() {
     res.redirect(url);
   });
 
-  app.post("/discord/settings", express.urlencoded({ extended: false }), (req, res) => {
+  app.get("/discord/user/:id", (req, res) => {
     void (async () => {
-      const routes = parseRoutesJson(String(req.body.routesJson ?? ""));
-      const alwaysReplyUsers = parseAlwaysReplyJson(String(req.body.alwaysReplyJson ?? ""));
-      if (!routes.length) {
-        res.redirect(`/discord?error=${encodeURIComponent("Add at least one server listen/post route.")}`);
+      const id = String(req.params.id ?? "").trim();
+      if (!/^\d{15,22}$/.test(id)) {
+        res.status(400).json({ ok: false, error: "Invalid Discord user ID" });
         return;
       }
-      try {
-        const next: DiscordRouting = { routes, alwaysReplyUsers };
-        await applyDiscordRouting(next);
-        res.redirect(`/discord?notice=${encodeURIComponent("Discord settings saved and bot reconnected.")}`);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "Could not reconnect Discord.";
-        res.redirect(`/discord?error=${encodeURIComponent(msg)}`);
+      const displayName = await resolveDiscordDisplayName(id);
+      res.json({ ok: true, id, displayName: displayName || null });
+    })().catch((err) => {
+      const msg = err instanceof Error ? err.message : "Lookup failed";
+      res.status(500).json({ ok: false, error: msg });
+    });
+  });
+
+  app.post(
+    "/discord/settings",
+    (req, res, next) => {
+      if (req.is("application/json")) {
+        express.json({ limit: "64kb" })(req, res, next);
+        return;
       }
-    })();
+      express.urlencoded({ extended: false })(req, res, next);
+    },
+    (req, res) => {
+      void (async () => {
+        const wantsJson = String(req.headers.accept ?? "").includes("application/json") || Boolean(req.is("application/json"));
+        let routes;
+        let alwaysReplyUsers;
+        if (req.is("application/json")) {
+          const body = req.body as { routes?: unknown; alwaysReply?: unknown; alwaysReplyUsers?: unknown };
+          routes = routesFromUnknown(body.routes);
+          alwaysReplyUsers = alwaysReplyFromUnknown(body.alwaysReply ?? body.alwaysReplyUsers);
+        } else {
+          routes = parseRoutesJson(String(req.body.routesJson ?? "[]"));
+          alwaysReplyUsers = parseAlwaysReplyJson(String(req.body.alwaysReplyJson ?? "[]"));
+        }
+        try {
+          const next: DiscordRouting = { routes, alwaysReplyUsers };
+          await applyDiscordRouting(next);
+          if (wantsJson) {
+            res.json({ ok: true, routes: next.routes.length, alwaysReply: next.alwaysReplyUsers.length });
+            return;
+          }
+          const notice = routes.length
+            ? `Discord settings saved (${routes.length} route${routes.length === 1 ? "" : "s"}).`
+            : "Discord settings saved. No listen routes — Discord replies are off, bot stays online for the dropdowns.";
+          res.redirect(`/discord?notice=${encodeURIComponent(notice)}`);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Could not save Discord settings.";
+          if (wantsJson) {
+            res.status(400).json({ ok: false, error: msg });
+            return;
+          }
+          res.redirect(`/discord?error=${encodeURIComponent(msg)}`);
+        }
+      })();
+    },
+  );
+
+  app.post("/discord/voice/join", express.json({ limit: "8kb" }), (req, res) => {
+    void (async () => {
+      const client = getDiscordClient();
+      if (!client?.isReady()) {
+        res.status(400).json({ ok: false, error: "Discord bot is offline." });
+        return;
+      }
+      const guildId = String(req.body?.guildId ?? "").trim();
+      const voiceChannelId = String(req.body?.voiceChannelId ?? "").trim();
+      const textChannelId = String(req.body?.textChannelId ?? "").trim();
+      if (!guildId || !voiceChannelId) {
+        res.status(400).json({ ok: false, error: "Pick a server and voice channel." });
+        return;
+      }
+      const result = await joinVoiceByIds(client, guildId, voiceChannelId, textChannelId || undefined);
+      if (!result.ok) {
+        res.status(400).json(result);
+        return;
+      }
+      res.json({ ok: true, channelName: result.channelName });
+    })().catch((err) => {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : "Join failed" });
+    });
+  });
+
+  app.post("/discord/voice/leave", express.json({ limit: "4kb" }), (req, res) => {
+    void (async () => {
+      const guildId = String(req.body?.guildId ?? "").trim();
+      await leaveVoice(guildId || undefined);
+      res.json({ ok: true });
+    })().catch((err) => {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : "Leave failed" });
+    });
+  });
+
+  app.post("/discord/voice/prefs", express.json({ limit: "4kb" }), (req, res) => {
+    try {
+      const voice = String(req.body?.voice ?? "").trim() as TtsVoiceId;
+      const modelRaw = String(req.body?.model ?? "").trim();
+      const model = modelRaw === "tts-1-hd" ? "tts-1-hd" : modelRaw === "tts-1" ? "tts-1" : undefined;
+      const prefs = saveVoicePrefs({ voice, model });
+      res.json({ ok: true, prefs });
+    } catch (err) {
+      res.status(400).json({ ok: false, error: err instanceof Error ? err.message : "Save failed" });
+    }
+  });
+
+  app.post("/discord/voice/test", express.json({ limit: "16kb" }), (req, res) => {
+    void (async () => {
+      const text = String(req.body?.text ?? "").trim();
+      if (!text) {
+        res.status(400).json({ ok: false, error: "Enter some text to speak." });
+        return;
+      }
+      const voice = String(req.body?.voice ?? "").trim() as TtsVoiceId | "";
+      const playInDiscord = Boolean(req.body?.playInDiscord);
+      const guildId = String(req.body?.guildId ?? "").trim();
+      const audio = await synthesizeSpeech(text, voice ? { voice } : undefined);
+      if (!audio) {
+        res.status(400).json({
+          ok: false,
+          error: "TTS failed. Free Edge TTS should work without credits — check the Terminal log.",
+        });
+        return;
+      }
+      if (playInDiscord && guildId) {
+        const spoken = await speakInGuild(guildId, text);
+        if (!spoken.ok) {
+          res.status(400).json({ ok: false, error: spoken.error });
+          return;
+        }
+      }
+      res.setHeader("Content-Type", "audio/mpeg");
+      res.setHeader("Cache-Control", "no-store");
+      res.send(audio);
+    })().catch((err) => {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : "Test failed" });
+    });
   });
 
   app.get("/admin/chat", (_req, res) => {
@@ -335,6 +520,7 @@ export function createServer() {
 
   app.post("/ai", express.urlencoded({ extended: false }), (req, res) => {
     const length = parseLength(req.body.length);
+    const provider = parseProvider(req.body.provider);
     saveSettings({
       ai: {
         personality: String(req.body.personality ?? ""),
@@ -342,6 +528,8 @@ export function createServer() {
         language: String(req.body.language ?? ""),
         canAnswer: String(req.body.canAnswer ?? ""),
         cannotAnswer: String(req.body.cannotAnswer ?? ""),
+        provider,
+        model: provider === "auto" ? "" : String(req.body.model ?? "").trim().slice(0, 120),
       },
     });
     res.redirect(`/ai?notice=${encodeURIComponent("AI settings saved")}`);
@@ -606,6 +794,13 @@ function sendDash(req: express.Request, res: express.Response, tab: DashTab): vo
 function parseLength(value: unknown): AiLength {
   if (value === "short" || value === "medium" || value === "long") return value;
   return "medium";
+}
+
+function parseProvider(value: unknown): AiProviderId {
+  if (value === "auto" || value === "gemini" || value === "openai" || value === "groq" || value === "openrouter") {
+    return value;
+  }
+  return "auto";
 }
 
 function stringQuery(value: unknown): string {

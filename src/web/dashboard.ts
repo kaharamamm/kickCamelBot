@@ -1,5 +1,5 @@
 import { ACCESS_LEVELS, getAccess, type AccessLevel } from "../bot/access.js";
-import { extraChannelSlugs } from "../bot/channelStore.js";
+import { extraChannelSlugs, extraChannels } from "../bot/channelStore.js";
 import { formatAnkaraShort } from "../bot/clock.js";
 import { lanUrls, tunnelBaseUrl } from "../bot/lan.js";
 import { BUILTIN_COMMANDS } from "../bot/commands.js";
@@ -7,12 +7,14 @@ import { listCustomCommands } from "../bot/customCommands.js";
 import { getCommandTimer } from "../bot/commandTimers.js";
 import { DOTA_PROFILES, defaultShownKey, steamApiKeyConfigured } from "../bot/dota.js";
 import { listModLog } from "../bot/modlog.js";
-import { listPeople } from "../bot/memory.js";
+import { listChatSummaries } from "../bot/chatMemory.js";
+import { KING_ID, listPeople } from "../bot/memory.js";
 import { formatRecapAgo, formatRecapDur, recapSnapshot } from "../bot/recap.js";
-import { getSettings, type AiLength } from "../bot/settings.js";
+import { getSettings, type AiLength, type AiProviderId } from "../bot/settings.js";
+import { AI_CATALOG, anyAiConfigured, providerStatus } from "../bot/aiProviders.js";
 import { listTimedCommands } from "../bot/timedStore.js";
 import { timerPreset } from "../bot/timerPreset.js";
-import { config } from "../config.js";
+import { config, reloadEnv } from "../config.js";
 import { discordStatus } from "../discord/client.js";
 import { discordInviteUrl } from "../discord/invite.js";
 import {
@@ -22,8 +24,20 @@ import {
 } from "../discord/identities.js";
 import { getDiscordRouting } from "../discord/settings.js";
 import { liveChatChannels, liveChatStatus } from "../kick/liveChat.js";
+import { EMOTE_MOODS, listEmotesForUi } from "../bot/kickEmotes.js";
+import { getEmoteMoodOverrides } from "../bot/emoteMoodStore.js";
 
-export type DashTab = "status" | "commands" | "ai" | "mod" | "memory" | "recap" | "admin" | "discord";
+export type DashTab =
+  | "status"
+  | "commands"
+  | "ai"
+  | "mod"
+  | "memory"
+  | "recap"
+  | "admin"
+  | "discord"
+  | "terminal"
+  | "emotes";
 
 const PAGE_SIZE = 12;
 
@@ -35,6 +49,7 @@ export async function dashboardPage(params: {
   noticeBad?: boolean;
   page?: number;
 }): Promise<string> {
+  reloadEnv();
   const page = Math.max(1, params.page ?? 1);
   const inner =
     params.tab === "commands"
@@ -51,7 +66,11 @@ export async function dashboardPage(params: {
                 ? adminBody()
                 : params.tab === "discord"
                   ? await discordBody()
-                  : statusBody(params.authorized, params.botAccount);
+                  : params.tab === "terminal"
+                    ? terminalBody()
+                    : params.tab === "emotes"
+                      ? emotesBody()
+                      : statusBody(params.authorized, params.botAccount);
   return layout(params.tab, params.notice ?? "", inner, params.noticeBad);
 }
 
@@ -64,6 +83,10 @@ function layout(tab: DashTab, notice: string, inner: string, noticeBad = false):
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body { margin: 0; font: 15px/1.5 system-ui, sans-serif; background: #0b0b0d; color: #ececec; }
+  body.emotes-page main { max-width: 90rem; overflow: hidden; display: flex; flex-direction: column; }
+  body.emotes-page .emote-shell { flex: 1; min-height: 0; display: flex; flex-direction: column; margin-bottom: 0; overflow: hidden; }
+  body.emotes-page .emote-shell-head { flex-shrink: 0; }
+  body.emotes-page .emote-grid-scroll { flex: 1; min-height: 0; overflow: auto; padding-right: .25rem; margin-top: .75rem; }
   header { border-bottom: 1px solid #2c2c33; background: #121216; flex-shrink: 0; }
   .bar { max-width: 72rem; margin: 0 auto; padding: 1rem 1.2rem .15rem; }
   h1 { margin: 0; font-size: 1.45rem; }
@@ -108,6 +131,7 @@ function layout(tab: DashTab, notice: string, inner: string, noticeBad = false):
   select { min-width: 7.2rem; flex-shrink: 0; }
   body.tall-page { overflow: hidden; display: flex; flex-direction: column; }
   body.tall-page main { width: 100%; max-width: 72rem; align-self: center; flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; padding-bottom: 1rem; }
+  body.tall-page.emotes-page main { max-width: 90rem; }
   body.tall-page .tall-card { width: 100%; flex: 1; min-height: 0; display: flex; flex-direction: column; margin-bottom: 0; }
   body.ai-page .ai-form { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: .45rem; margin-top: .5rem; }
   body.ai-page .ai-form textarea[name=personality] { flex: 1.6; min-height: 8rem; resize: none; }
@@ -156,7 +180,35 @@ function layout(tab: DashTab, notice: string, inner: string, noticeBad = false):
   .item-list li:last-child { border-bottom: 0; }
   .item-list .grow { flex: 1; min-width: 0; }
   .route-status { grid-column: 1 / -1; margin: .15rem 0; }
-</style></head><body class="${tab === "ai" || tab === "mod" || tab === "memory" || tab === "admin" ? `tall-page${tab === "ai" ? " ai-page" : tab === "admin" ? " admin-page" : ""}` : ""}">
+  body.terminal-page main { width: 100%; max-width: 72rem; align-self: center; flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; padding-bottom: 1rem; }
+  body.terminal-page .terminal-card { flex: 1; min-height: 0; display: flex; flex-direction: column; margin-bottom: 0; }
+  .terminal-log { flex: 1; min-height: 18rem; overflow: auto; background: #070709; border: 1px solid #2c2c33; border-radius: 12px; padding: .7rem .85rem; margin-top: .6rem; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .term-line { margin: .2rem 0; white-space: pre-wrap; word-break: break-word; color: #c8c8d0; }
+  .term-line .ts { color: #6a6a74; margin-right: .45rem; }
+  .term-line .src { color: #7dff6a; margin-right: .45rem; }
+  .term-line.think .src { color: #b47cff; }
+  .term-line.ok .src { color: #53fc18; }
+  .term-line.fail { color: #ffb4b8; }
+  .term-line.fail .src { color: #ff6b6b; }
+  .term-line.warn { color: #ffd28a; }
+  .term-line.warn .src { color: #ffb020; }
+  .emote-toolbar { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin: 0 0 1rem; }
+  .emote-toolbar input[type=search] { flex: 1; min-width: 12rem; max-width: 22rem; }
+  .emote-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(11.5rem, 1fr)); gap: .75rem; }
+  .emote-card { background: #121216; border: 1px solid #2c2c33; border-radius: 14px; padding: .75rem; display: flex; flex-direction: column; gap: .45rem; align-items: stretch; }
+  .emote-card.changed { border-color: #53fc18; }
+  .emote-card img { width: 48px; height: 48px; object-fit: contain; align-self: center; image-rendering: auto; background: #0b0b0d; border-radius: 8px; }
+  .emote-card .ename { font-size: 13px; font-weight: 650; text-align: center; word-break: break-word; }
+  .emote-card .edef { font-size: 11px; color: #6a6a74; text-align: center; }
+  .emote-card select { width: 100%; font-size: 13px; }
+  .emote-counts { display: flex; flex-wrap: wrap; gap: .4rem; margin: 0 0 1rem; }
+  .emote-counts span { background: #121216; border: 1px solid #2c2c33; border-radius: 999px; padding: .2rem .55rem; font-size: 12px; color: #b0b0b8; }
+  .emote-counts span b { color: #53fc18; }
+</style></head><body class="${
+    tab === "ai" || tab === "mod" || tab === "memory" || tab === "admin" || tab === "terminal" || tab === "emotes"
+      ? `tall-page${tab === "ai" ? " ai-page" : tab === "admin" ? " admin-page" : tab === "terminal" ? " terminal-page" : tab === "emotes" ? " emotes-page" : ""}`
+      : ""
+  }">
 <header>
   <div class="bar"><h1>${config.bot.name}</h1></div>
   <nav>
@@ -167,7 +219,9 @@ function layout(tab: DashTab, notice: string, inner: string, noticeBad = false):
     <a class="${tab === "recap" ? "on" : ""}" href="/recap">Recap</a>
     <a class="${tab === "ai" ? "on" : ""}" href="/ai">AI</a>
     <a class="${tab === "admin" ? "on" : ""}" href="/admin">Admin</a>
+    <a class="${tab === "terminal" ? "on" : ""}" href="/terminal">Terminal</a>
     <a class="${tab === "discord" ? "on" : ""}" href="/discord">Discord</a>
+    <a class="${tab === "emotes" ? "on" : ""}" href="/emotes">Emojis</a>
   </nav>
 </header>
 <main>
@@ -205,9 +259,9 @@ function statusBody(authorized: boolean, botAccount?: string): string {
     <div class="grid">
       <p>Login: ${authorized ? '<span class="ok">authorized</span>' : '<span class="warn">not authorized</span>'}</p>
       <p>Posts as: ${botAccount ? `<span class="ok">${escapeHtml(botAccount)}</span>` : '<span class="warn">streamer account</span>'}</p>
-      <p>AI: ${config.gemini.apiKey ? '<span class="ok">online</span>' : '<span class="warn">off</span>'}</p>
+      <p>AI: ${anyAiConfigured() ? '<span class="ok">online</span>' : '<span class="warn">off — add a key in .env</span>'}</p>
       <p>Live chat: ${liveChatStatus.startsWith("listening") ? `<span class="ok">${escapeHtml(liveChatStatus)}</span>` : `<span class="warn">${escapeHtml(liveChatStatus)}</span>`}</p>
-      <p>Mod /clear: <span class="warn">type /clear in Kick chat — bots can't run it server-side</span></p>
+      <p>Mod /clear + chat modes: <span class="ok">streamer site session_token</span> (OAuth cannot run these)</p>
     </div>
     <p class="muted">Chat uses Kick's live socket. Follows, subs, gifts, and title changes need the Cloudflare webhook tunnel.</p>
     ${webhookFormula()}
@@ -315,10 +369,39 @@ async function discordBody(): Promise<string> {
     .join("");
 
   const inviteUrl = discordInviteUrl();
+  const kingId = discordKingUserId();
   const initialRoutes = JSON.stringify(routing.routes);
-  const initialAlwaysReply = JSON.stringify(routing.alwaysReplyUsers);
+  const initialAlwaysReply = JSON.stringify(
+    d.alwaysReplyUsers.map((u) => ({
+      id: u.id,
+      label: u.label.trim() || u.displayName || "",
+    })),
+  );
   const guildOptionsJson = JSON.stringify(d.guildOptions);
   const channelsByGuildJson = JSON.stringify(d.channelsByGuild);
+  const voiceChannelsByGuildJson = JSON.stringify(d.voiceChannelsByGuild);
+  const voiceMetaJson = JSON.stringify({
+    voiceId: d.voice.voiceId,
+    model: d.voice.model,
+    voices: d.voice.voices,
+    sessions: d.voice.sessions,
+    stt: d.voice.stt,
+    tts: d.voice.tts,
+    sttProvider: d.voice.sttProvider,
+    ttsProvider: d.voice.ttsProvider,
+  });
+  const sessionHint = d.voice.sessions[0]
+    ? `${d.voice.sessions.length} joined`
+    : "none";
+  const accessWarnings = d.routes
+    .filter((r) => d.ready && (!r.listenName || !r.postName))
+    .map((r) => {
+      const parts = [];
+      if (!r.listenName) parts.push(`listen ${r.listenChannelId}`);
+      if (!r.postName) parts.push(`post ${r.postChannelId}`);
+      return `<p class="route-status"><span class="warn">Missing Access</span> — bot cannot see ${escapeHtml(parts.join(" / "))} in ${escapeHtml(r.guildName ?? r.guildId)}. Fix channel permissions or pick another channel.</p>`;
+    })
+    .join("");
 
   return `
   <div class="card">
@@ -332,20 +415,66 @@ async function discordBody(): Promise<string> {
     <div class="grid">
       <p>Token: ${d.configured ? '<span class="ok">set in .env</span>' : '<span class="warn">DISCORD_BOT_TOKEN missing</span>'}</p>
       <p>Connection: ${d.ready ? `<span class="ok">online${d.tag ? ` — ${escapeHtml(d.tag)}` : ""}</span>` : '<span class="warn">offline — run npm run dev</span>'}</p>
-      <p>AI replies: ${config.gemini.apiKey ? '<span class="ok">Gemini ready</span>' : '<span class="warn">GEMINI_API_KEY missing</span>'}</p>
-      <p>Routes: ${d.routes.length ? `<span class="ok">${d.routes.length} active</span>` : '<span class="warn">none</span>'}</p>
+      <p>AI replies: ${anyAiConfigured() ? '<span class="ok">ready</span>' : '<span class="warn">no AI keys in .env</span>'}</p>
+      <p>Voice STT: ${d.voice.stt ? `<span class="ok">${escapeHtml(d.voice.sttProvider || "ready")}</span>` : '<span class="warn">need GROQ_API_KEY (free Whisper)</span>'}</p>
+      <p>Voice TTS: <span class="ok">${escapeHtml(d.voice.ttsProvider || "Edge TTS (free)")}</span> · ${escapeHtml(d.voice.voiceId)}</p>
+      <p>In voice: ${d.voice.sessions.length ? `<span class="ok">${escapeHtml(sessionHint)}</span>` : '<span class="muted">none — join below</span>'}</p>
+      <p>Routes: ${d.routes.length ? `<span class="ok">${d.routes.length} active</span>` : '<span class="muted">none — add below (bot still connects)</span>'}</p>
       <p>Always reply: ${d.alwaysReplyUserIds.length ? `<span class="ok">${d.alwaysReplyUserIds.length} users</span>` : '<span class="muted">none</span>'}</p>
       <p>Messages seen: ${d.messagesSeen} · Replies sent: ${d.repliesSent}</p>
       <p>Last message: ${escapeHtml(fmt(d.lastMessageAt))} · Last reply: ${escapeHtml(fmt(d.lastReplyAt))}</p>
-      ${d.lastError ? `<p style="grid-column:1/-1">Last error: <span class="warn">${escapeHtml(d.lastError)}</span></p>` : ""}
+      ${d.ready && !d.guildOptions.length ? '<p style="grid-column:1/-1" class="warn">Bot is online but not in any servers. Use Invite bot to server, then refresh.</p>' : ""}
+      ${!d.ready && d.configured ? '<p style="grid-column:1/-1" class="muted">Waiting for Discord login… if this stays offline, restart <code>npm run dev</code> (only one copy).</p>' : ""}
       ${routeStatusRows}
+      ${accessWarnings}
     </div>
+
+    <h3>Voice panel</h3>
+    <p class="muted">Join a Discord voice channel from here, pick a TTS voice, and test how CamelBot sounds in your browser (and optionally in the call).</p>
+    <div class="add-row" id="voicePanelRow">
+      <label>Server
+        <select id="voiceGuildPick"><option value="">— pick server —</option></select>
+      </label>
+      <label>Voice channel
+        <select id="voiceChannelPick"><option value="">— pick voice —</option></select>
+      </label>
+      <label>Transcript text channel
+        <select id="voiceTextPick"><option value="">— auto from routes —</option></select>
+      </label>
+    </div>
+    <div class="row" style="margin-top:.55rem">
+      <button type="button" class="btn" id="voiceJoinBtn">Join voice</button>
+      <button type="button" class="btn ghost" id="voiceLeaveBtn">Leave voice</button>
+      <span class="muted" id="voiceJoinStatus"></span>
+    </div>
+    <div class="add-row" style="margin-top:.85rem">
+      <label>Speaking voice
+        <select id="ttsVoicePick"></select>
+      </label>
+      <label>TTS model
+        <select id="ttsModelPick">
+          <option value="tts-1">tts-1 (fast)</option>
+          <option value="tts-1-hd">tts-1-hd (clearer)</option>
+        </select>
+      </label>
+      <button type="button" class="btn ghost" id="ttsSaveBtn">Save voice</button>
+    </div>
+    <h3>Test voice</h3>
+    <p class="muted">Type a line, hit <strong>Play in browser</strong> to hear it here. Optionally also play it in the Discord call if the bot is joined.</p>
+    <textarea id="voiceTestText" placeholder="Merhaba chat, ben CamelBot." style="min-height:3.2rem"></textarea>
+    <div class="row">
+      <button type="button" class="btn" id="voiceTestBrowserBtn">Play in browser</button>
+      <button type="button" class="btn ghost" id="voiceTestDiscordBtn">Play in Discord call</button>
+      <span class="muted" id="voiceTestStatus"></span>
+    </div>
+    <audio id="voiceTestPlayer" controls style="width:100%;margin-top:.65rem"></audio>
+
     <form class="stack" id="discordForm" method="post" action="/discord/settings">
       <input type="hidden" name="routesJson" id="routesJson">
       <input type="hidden" name="alwaysReplyJson" id="alwaysReplyJson">
 
       <h3>Listen / post routes</h3>
-      <p class="muted">Add one row per server: bot reads in the listen channel and posts replies in the post channel (or the same channel). Saved to <code>data/discord.json</code>.</p>
+      <p class="muted">Pick a server and listen channel, then click <strong>Add route</strong> — it saves immediately (no extra Save click). Remove also saves right away.</p>
       <div class="add-row" id="routeAddRow">
         <label>Server
           <select id="routeGuildPick"><option value="">— pick server —</option></select>
@@ -372,13 +501,13 @@ async function discordBody(): Promise<string> {
       <ul class="item-list" id="routeList"></ul>
 
       <h3>Always reply users</h3>
-      <p class="muted">These users get a reply even without @mentioning the bot. Nickname is optional if they are in Known people.</p>
+      <p class="muted">These users get a reply even without saying camel/bot. Everyone else (including you) needs a keyword, @mention, reply, or a 15s follow-up after the bot last spoke.</p>
       <div class="add-row">
         <label>Discord user ID
-          <input type="text" id="alwaysIdInput" placeholder="231086890017751040">
+          <input type="text" id="alwaysIdInput" placeholder="145668146143952896">
         </label>
-        <label>Nickname <span class="muted">(optional)</span>
-          <input type="text" id="alwaysLabelInput" placeholder="mcvckaharamamm">
+        <label>Nickname <span class="muted">(optional — auto from Discord)</span>
+          <input type="text" id="alwaysLabelInput" placeholder="auto-fill from Discord">
         </label>
         <button type="button" class="btn" id="alwaysAddBtn">Add user</button>
       </div>
@@ -391,16 +520,21 @@ async function discordBody(): Promise<string> {
       </table>
       <p>King (static): <code>${escapeHtml(discordKingUserId())}</code> — <strong>mcvckaharamamm</strong> <span class="muted">(${escapeHtml(DISCORD_KING_ID)})</span></p>
       <div class="row">
-        <button type="submit">Save &amp; reconnect</button>
+        <button type="submit">Save</button>
       </div>
     </form>
-    <p class="muted">Bot needs <strong>View Channel</strong>, <strong>Send Messages</strong>, and <strong>Read Message History</strong> in both listen and post channels (when they differ).</p>
+    <p class="muted"><strong>Free path:</strong> STT = Groq Whisper (<code>GROQ_API_KEY</code>). TTS = Microsoft Edge neural voices (no credits). OpenAI voices in the picker need billed API credits.</p>
+    <p class="muted">Bot needs <strong>View Channel</strong>, <strong>Send Messages</strong>, <strong>Read Message History</strong>, <strong>Connect</strong> + <strong>Speak</strong> for voice, plus <strong>Move / Mute / Deafen / Kick / Ban / Timeout Members</strong> for staff orders. Re-invite with the button if a command says missing permission. Discord now requires DAVE encryption — if join keeps timing out, use <strong>Node 22+</strong>.</p>
+    <p class="muted">Wake with <strong>camel</strong> / <strong>camelbot</strong> / <strong>bot</strong> (text or voice). Staff examples: <em>bot move me to General</em>, <em>bot move us to chill</em>, <em>bot mute @user</em>, <em>bot kick @user from voice</em>. From Kick: <em>benim olduğum DC kanalına gir ve selam de</em>. Kick stream orders from Discord still need a wake word.</p>
     <p class="muted">Use <strong>Invite bot to server</strong> to add AmqKeliBot to another Discord server, then refresh this page and pick that server from the dropdown.</p>
   </div>
   <script>
   (() => {
     const guildOptions = ${guildOptionsJson};
     const channelsByGuild = ${channelsByGuildJson};
+    const voiceChannelsByGuild = ${voiceChannelsByGuildJson};
+    const voiceMeta = ${voiceMetaJson};
+    const KING_ID = ${JSON.stringify(kingId)};
     let routes = ${initialRoutes};
     let alwaysReply = ${initialAlwaysReply};
 
@@ -439,9 +573,35 @@ async function discordBody(): Promise<string> {
       postPick.innerHTML = '<option value="">Same as listen</option>' + opts;
     }
 
+    function syncHidden() {
+      routesJson.value = JSON.stringify(routes);
+      alwaysReplyJson.value = JSON.stringify(alwaysReply);
+    }
+
+    async function persistDiscord() {
+      syncHidden();
+      try {
+        const res = await fetch("/discord/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({ routes, alwaysReply }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.ok === false) {
+          alert(data.error || "Could not save Discord settings.");
+          return false;
+        }
+        return true;
+      } catch (err) {
+        alert("Could not save Discord settings.");
+        return false;
+      }
+    }
+
     function renderRoutes() {
+      syncHidden();
       if (!routes.length) {
-        routeList.innerHTML = '<li class="muted">No routes yet — add one above.</li>';
+        routeList.innerHTML = '<li class="muted">No routes yet — Discord replies off after save.</li>';
         return;
       }
       routeList.innerHTML = routes.map((r, i) => {
@@ -457,13 +617,15 @@ async function discordBody(): Promise<string> {
         btn.addEventListener("click", () => {
           routes.splice(Number(btn.getAttribute("data-route")), 1);
           renderRoutes();
+          void persistDiscord();
         });
       });
     }
 
     function renderAlwaysReply() {
+      syncHidden();
       if (!alwaysReply.length) {
-        alwaysList.innerHTML = '<li class="muted">No users yet — add one above.</li>';
+        alwaysList.innerHTML = '<li class="muted">None — everyone needs camel/bot, @mention, or a follow-up.</li>';
         return;
       }
       alwaysList.innerHTML = alwaysReply.map((u, i) => {
@@ -473,8 +635,10 @@ async function discordBody(): Promise<string> {
       }).join("");
       alwaysList.querySelectorAll("[data-always]").forEach((btn) => {
         btn.addEventListener("click", () => {
-          alwaysReply.splice(Number(btn.getAttribute("data-always")), 1);
+          const idx = Number(btn.getAttribute("data-always"));
+          alwaysReply.splice(idx, 1);
           renderAlwaysReply();
+          void persistDiscord();
         });
       });
     }
@@ -499,11 +663,12 @@ async function discordBody(): Promise<string> {
       listenManual.value = "";
       postManual.value = "";
       renderRoutes();
+      void persistDiscord();
     });
 
-    document.getElementById("alwaysAddBtn").addEventListener("click", () => {
+    document.getElementById("alwaysAddBtn").addEventListener("click", async () => {
       const id = alwaysIdInput.value.trim();
-      const label = alwaysLabelInput.value.trim();
+      let label = alwaysLabelInput.value.trim();
       if (!/^\\d{15,22}$/.test(id)) {
         alert("Enter a valid Discord user ID (15–22 digits).");
         return;
@@ -512,15 +677,32 @@ async function discordBody(): Promise<string> {
         alert("That user is already in the list.");
         return;
       }
+      if (!label) {
+        try {
+          const res = await fetch("/discord/user/" + encodeURIComponent(id));
+          const data = await res.json();
+          if (data && data.displayName) label = data.displayName;
+        } catch (_) {}
+      }
       alwaysReply.push({ id, label });
       alwaysIdInput.value = "";
       alwaysLabelInput.value = "";
       renderAlwaysReply();
+      void persistDiscord();
     });
 
-    form.addEventListener("submit", () => {
-      routesJson.value = JSON.stringify(routes);
-      alwaysReplyJson.value = JSON.stringify(alwaysReply);
+    form.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      const guildId = guildPick.value || guildManual.value.trim();
+      const listenChannelId = listenPick.value || listenManual.value.trim();
+      const postChannelId = postPick.value || postManual.value.trim();
+      if (guildId && listenChannelId && !routes.some((r) => r.guildId === guildId && r.listenChannelId === listenChannelId)) {
+        routes.push({ guildId, listenChannelId, postChannelId });
+        renderRoutes();
+      }
+      void persistDiscord().then((ok) => {
+        if (ok) window.location.href = "/discord?notice=" + encodeURIComponent("Discord settings saved.");
+      });
     });
 
     fillGuildSelect();
@@ -529,6 +711,132 @@ async function discordBody(): Promise<string> {
     fillChannelSelects(guildPick.value);
     renderRoutes();
     renderAlwaysReply();
+
+    // --- Voice panel ---
+    function esc(s) {
+      return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    }
+    const voiceGuild = document.getElementById("voiceGuildPick");
+    const voiceChannel = document.getElementById("voiceChannelPick");
+    const voiceText = document.getElementById("voiceTextPick");
+    const ttsVoice = document.getElementById("ttsVoicePick");
+    const ttsModel = document.getElementById("ttsModelPick");
+    const joinStatus = document.getElementById("voiceJoinStatus");
+    const testStatus = document.getElementById("voiceTestStatus");
+    const testPlayer = document.getElementById("voiceTestPlayer");
+    const testText = document.getElementById("voiceTestText");
+
+    function fillVoiceGuild() {
+      voiceGuild.innerHTML = '<option value="">— pick server —</option>' +
+        guildOptions.map((g) => '<option value="' + g.id + '">' + esc(g.name) + '</option>').join("");
+    }
+    function fillVoiceChannels(guildId) {
+      const vcs = voiceChannelsByGuild[guildId] || [];
+      const texts = channelsByGuild[guildId] || [];
+      voiceChannel.innerHTML = '<option value="">— pick voice —</option>' +
+        vcs.map((c) => '<option value="' + c.id + '">' + esc(c.name) + '</option>').join("");
+      voiceText.innerHTML = '<option value="">— auto from routes —</option>' +
+        texts.map((c) => '<option value="' + c.id + '">' + esc(c.name) + '</option>').join("");
+      const sess = (voiceMeta.sessions || []).find((s) => s.guildId === guildId);
+      if (sess) {
+        voiceChannel.value = sess.voiceChannelId;
+        if (sess.textChannelId) voiceText.value = sess.textChannelId;
+      }
+    }
+    function fillTtsVoices() {
+      ttsVoice.innerHTML = (voiceMeta.voices || []).map((v) =>
+        '<option value="' + v.id + '"' + (v.id === voiceMeta.voiceId ? " selected" : "") + ">" + esc(v.label) + "</option>"
+      ).join("");
+      ttsModel.value = voiceMeta.model || "tts-1";
+    }
+    async function postJson(url, body) {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify(body),
+      });
+      const ct = res.headers.get("content-type") || "";
+      if (ct.includes("audio/")) return { ok: res.ok, audio: await res.arrayBuffer(), status: res.status };
+      const data = await res.json().catch(() => ({ ok: false, error: "Bad response" }));
+      return { ...data, ok: res.ok && data.ok !== false, status: res.status };
+    }
+
+    voiceGuild.addEventListener("change", () => fillVoiceChannels(voiceGuild.value));
+    fillVoiceGuild();
+    fillTtsVoices();
+    const vg = (voiceMeta.sessions && voiceMeta.sessions[0]?.guildId) || routes[0]?.guildId || guildOptions[0]?.id || "";
+    if (vg) {
+      voiceGuild.value = vg;
+      fillVoiceChannels(vg);
+    }
+
+    document.getElementById("voiceJoinBtn").addEventListener("click", async () => {
+      joinStatus.textContent = "Joining…";
+      const data = await postJson("/discord/voice/join", {
+        guildId: voiceGuild.value,
+        voiceChannelId: voiceChannel.value,
+        textChannelId: voiceText.value,
+      });
+      joinStatus.textContent = data.ok ? ("Joined " + (data.channelName || "voice")) : (data.error || "Join failed");
+      if (data.ok) joinStatus.className = "ok";
+      else joinStatus.className = "warn";
+    });
+    document.getElementById("voiceLeaveBtn").addEventListener("click", async () => {
+      joinStatus.textContent = "Leaving…";
+      const data = await postJson("/discord/voice/leave", { guildId: voiceGuild.value });
+      joinStatus.textContent = data.ok ? "Left voice." : (data.error || "Leave failed");
+      joinStatus.className = data.ok ? "muted" : "warn";
+    });
+    document.getElementById("ttsSaveBtn").addEventListener("click", async () => {
+      const data = await postJson("/discord/voice/prefs", { voice: ttsVoice.value, model: ttsModel.value });
+      joinStatus.textContent = data.ok ? ("Saved voice: " + ttsVoice.value) : (data.error || "Save failed");
+      joinStatus.className = data.ok ? "ok" : "warn";
+      if (data.ok && data.prefs) {
+        voiceMeta.voiceId = data.prefs.voice;
+        voiceMeta.model = data.prefs.model;
+      }
+    });
+
+    async function runVoiceTest(playInDiscord) {
+      const text = (testText.value || "").trim();
+      if (!text) {
+        testStatus.textContent = "Enter text first.";
+        testStatus.className = "warn";
+        return;
+      }
+      testStatus.textContent = "Generating…";
+      testStatus.className = "muted";
+      try {
+        const res = await fetch("/discord/voice/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text,
+            voice: ttsVoice.value,
+            playInDiscord: Boolean(playInDiscord),
+            guildId: voiceGuild.value,
+          }),
+        });
+        const ct = res.headers.get("content-type") || "";
+        if (!res.ok || !ct.includes("audio/")) {
+          const data = await res.json().catch(() => ({}));
+          testStatus.textContent = data.error || ("Failed (" + res.status + ")");
+          testStatus.className = "warn";
+          return;
+        }
+        const buf = await res.arrayBuffer();
+        const url = URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
+        testPlayer.src = url;
+        void testPlayer.play().catch(() => {});
+        testStatus.textContent = playInDiscord ? "Playing in Discord + browser." : "Playing in browser.";
+        testStatus.className = "ok";
+      } catch (err) {
+        testStatus.textContent = err && err.message ? err.message : "Test failed";
+        testStatus.className = "warn";
+      }
+    }
+    document.getElementById("voiceTestBrowserBtn").addEventListener("click", () => void runVoiceTest(false));
+    document.getElementById("voiceTestDiscordBtn").addEventListener("click", () => void runVoiceTest(true));
   })();
   </script>`;
 }
@@ -657,9 +965,36 @@ function modBody(page: number): string {
 
 function memoryBody(page: number): string {
   const sliced = pageSlice(listPeople(), page);
+  const rooms = listChatSummaries();
+  const extras = extraChannels();
+  const homeSlug = liveChatChannels[0] ?? "mcvckaharamamm";
+  const roomLabel = (channelId: number): string => {
+    if (channelId === KING_ID) return homeSlug;
+    return extras.find((c) => c.userId === channelId)?.slug ?? `channel ${channelId}`;
+  };
+  const roomRows = rooms.length
+    ? rooms
+        .map((r) => {
+          const when = r.lastSummaryAt
+            ? ` · updated ${escapeHtml(formatAnkaraShort(r.lastSummaryAt))}`
+            : "";
+          const note = r.summary
+            ? escapeHtml(r.summary)
+            : "<span class='muted'>Not enough chat yet — updates after 10 messages.</span>";
+          return `<li style="align-items:flex-start">
+            <span class="grow">
+              <strong>${escapeHtml(roomLabel(r.channelId))}</strong>
+              ${channelIdTag(r.channelId, extras)}
+              <span class="muted">${when}</span>
+              <div>${note}</div>
+            </span>
+          </li>`;
+        })
+        .join("")
+    : "<li class='muted'>No room summary yet. CamelBot writes one after 10 chat lines.</li>";
   const rows = sliced.rows
     .map((p) => {
-      const you = p.userId === 549839;
+      const you = p.userId === KING_ID;
       const nick = p.nick && p.nick !== p.username ? ` · nick ${escapeHtml(p.nick)}` : "";
       const bio = p.bio ? `<div class="muted">Bio: ${escapeHtml(p.bio)}</div>` : "";
       const note = p.summary
@@ -681,12 +1016,21 @@ function memoryBody(page: number): string {
       <h2>Memory</h2>
       <a class="btn" href="/memory?p=${sliced.page}">Refresh</a>
     </div>
-    <p class="muted">Short notes CamelBot keeps per chatter (Kick nick, bio, and a compact summary of chats with the bot). Notes appear after 5 real chat lines, so one-off bots stay out.</p>
+    <p class="muted">Room summary of what chat is talking about, plus short notes per person (Kick nick, bio, chats with the bot). Person notes appear after 5 real chat lines.</p>
+    <h3>Chat summary</h3>
+    <ul class="list">${roomRows}</ul>
+    <h3>People</h3>
     <div class="list-scroll">
       <ul class="list">${rows || "<li class='muted'>Nobody remembered yet. Notes appear after CamelBot talks with someone.</li>"}</ul>
     </div>
     ${pager("/memory", sliced.page, sliced.pages, sliced.total)}
   </div>`;
+}
+
+function channelIdTag(channelId: number, extras: Array<{ slug: string; userId?: number }>): string {
+  if (channelId === KING_ID) return ' <span class="tag">home</span>';
+  if (extras.some((c) => c.userId === channelId)) return ' <span class="tag dim">extra</span>';
+  return "";
 }
 
 function recapBody(): string {
@@ -770,14 +1114,147 @@ function recapBody(): string {
   </div>`;
 }
 
+function emotesBody(): string {
+  const rows = listEmotesForUi();
+  const overrides = getEmoteMoodOverrides();
+  const counts: Record<string, number> = {};
+  for (const mood of EMOTE_MOODS) counts[mood] = 0;
+  for (const row of rows) counts[row.mood] = (counts[row.mood] ?? 0) + 1;
+
+  const countChips = EMOTE_MOODS.map(
+    (m) => `<span data-mood-chip="${m}">${escapeHtml(m)} <b>${counts[m] ?? 0}</b></span>`,
+  ).join("");
+
+  const cards = rows
+    .map((e) => {
+      const changed = Boolean(overrides[e.name]);
+      const opts = EMOTE_MOODS.map(
+        (m) =>
+          `<option value="${m}" ${e.mood === m ? "selected" : ""}>${m}${
+            m === e.defaultMood ? " (default)" : ""
+          }</option>`,
+      ).join("");
+      return `<label class="emote-card${changed ? " changed" : ""}" data-name="${escapeHtml(
+        e.name.toLowerCase(),
+      )}" data-mood="${e.mood}">
+        <img src="${escapeHtml(e.img)}" alt="${escapeHtml(e.name)}" loading="lazy" width="48" height="48" onerror="this.style.opacity=.25">
+        <span class="ename">${escapeHtml(e.name)}</span>
+        <span class="edef">default: ${escapeHtml(e.defaultMood)}</span>
+        <select name="mood_${escapeHtml(e.name)}">${opts}</select>
+      </label>`;
+    })
+    .join("");
+
+  return `<div class="card emote-shell">
+    <div class="emote-shell-head">
+      <div class="card-head">
+        <h2>Kick emotes · mood buckets</h2>
+        <button type="submit" form="emote-mood-form">Save moods</button>
+      </div>
+      <p class="muted">Moods follow Plutchik’s basics (happy, sad, angry, fear, surprise, disgust, trust, anticipation) plus Kick vibes (laugh, love, cool, confused, hype, dance). Change a listing to control which emotes get appended. Green border = custom override (<code>data/emote-moods.json</code>).</p>
+      <div class="emote-counts">${countChips}</div>
+      <div class="emote-toolbar">
+        <input type="search" id="emote-filter" placeholder="Filter by name…" autocomplete="off">
+        <select id="emote-mood-filter">
+          <option value="">All moods</option>
+          ${EMOTE_MOODS.map((m) => `<option value="${m}">${m}</option>`).join("")}
+        </select>
+        <button type="button" id="emote-reset-defaults" class="ghost">Reset all to defaults</button>
+      </div>
+    </div>
+    <form id="emote-mood-form" method="post" action="/emotes" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+      <div class="emote-grid-scroll">
+        <div class="emote-grid">${cards}</div>
+      </div>
+    </form>
+  </div>
+  <script>
+  (function () {
+    var filter = document.getElementById("emote-filter");
+    var moodFilter = document.getElementById("emote-mood-filter");
+    var resetBtn = document.getElementById("emote-reset-defaults");
+    function applyFilter() {
+      var q = (filter.value || "").trim().toLowerCase();
+      var mood = moodFilter.value || "";
+      document.querySelectorAll(".emote-card").forEach(function (card) {
+        var name = card.getAttribute("data-name") || "";
+        var m = card.querySelector("select");
+        var cur = m ? m.value : card.getAttribute("data-mood");
+        var ok = (!q || name.indexOf(q) !== -1) && (!mood || cur === mood);
+        card.style.display = ok ? "" : "none";
+      });
+    }
+    if (filter) filter.addEventListener("input", applyFilter);
+    if (moodFilter) moodFilter.addEventListener("change", applyFilter);
+    document.querySelectorAll(".emote-card select").forEach(function (sel) {
+      sel.addEventListener("change", function () {
+        var card = sel.closest(".emote-card");
+        if (!card) return;
+        card.setAttribute("data-mood", sel.value);
+        applyFilter();
+      });
+    });
+    if (resetBtn) resetBtn.addEventListener("click", function () {
+      document.querySelectorAll(".emote-card").forEach(function (card) {
+        var def = (card.querySelector(".edef") || {}).textContent || "";
+        var mood = (def.match(/default:\\s*(\\w+)/) || [])[1];
+        var sel = card.querySelector("select");
+        if (sel && mood) {
+          sel.value = mood;
+          card.setAttribute("data-mood", mood);
+          card.classList.remove("changed");
+        }
+      });
+      applyFilter();
+    });
+  })();
+  </script>`;
+}
+
 function aiBody(): string {
   const ai = getSettings().ai;
   const lengthOpts: AiLength[] = ["short", "medium", "long"];
+  const providerOpts: Array<{ id: AiProviderId; label: string }> = [
+    { id: "auto", label: "Auto — fast model for chat, stronger for hard questions" },
+    { id: "gemini", label: "Gemini only" },
+    { id: "groq", label: "Groq only (free / fast)" },
+    { id: "openai", label: "OpenAI only (paid API — not Auto)" },
+    { id: "openrouter", label: "OpenRouter only" },
+  ];
+  const keys = providerStatus();
+  const keyRows = keys
+    .map(
+      (k) =>
+        `<tr><td>${escapeHtml(k.label)}</td><td><code>${escapeHtml(k.envName)}</code></td><td>${
+          k.configured ? '<span class="ok">set</span>' : '<span class="warn">missing</span>'
+        }</td></tr>`,
+    )
+    .join("");
+  const catalogJson = JSON.stringify(
+    Object.fromEntries(AI_CATALOG.map((p) => [p.id, p.models.map((m) => ({ id: m.id, label: m.label }))])),
+  );
   return `
   <div class="card tall-card">
-    <h2>How CamelBot talks</h2>
-    <p class="muted">These rules apply to @${config.bot.name}, questions, and home-channel chat replies.</p>
-    <form class="stack ai-form" method="post" action="/ai">
+    <div class="card-head">
+      <h2>AI agent</h2>
+      <div class="row">
+        <a class="btn ghost" href="/ai">Refresh</a>
+      </div>
+    </div>
+    <p class="muted">Keys live in <code>.env</code>. Refresh reloads that file (no full restart needed). ChatGPT Pro is not an API — use <code>OPENAI_API_KEY</code> from platform.openai.com. Auto: Groq/Gemini for snappy chat, OpenAI/Gemini for harder questions.</p>
+    <table class="facts" style="width:100%;margin:.5rem 0 1rem">
+      <tr><th>Provider</th><th>.env key</th><th>Status</th></tr>
+      ${keyRows}
+    </table>
+    <form class="stack ai-form" method="post" action="/ai" id="aiAgentForm">
+      <label class="muted">Agent</label>
+      <select name="provider" id="aiProvider">
+        ${providerOpts.map((p) => `<option value="${p.id}" ${ai.provider === p.id ? "selected" : ""}>${escapeHtml(p.label)}</option>`).join("")}
+      </select>
+      <label class="muted">Model <span class="muted">(ignored in Auto except as a hint; empty = default)</span></label>
+      <select name="model" id="aiModel"></select>
+      <input type="hidden" name="modelCustom" id="aiModelCustom" value="${escapeHtml(ai.model)}">
+      <p class="muted" id="aiProviderHint"></p>
       <label class="muted">Personality / how it sounds</label>
       <textarea name="personality" required>${escapeHtml(ai.personality)}</textarea>
       <label class="muted">Default answer length</label>
@@ -793,7 +1270,35 @@ function aiBody(): string {
       <textarea name="cannotAnswer" required>${escapeHtml(ai.cannotAnswer)}</textarea>
       <div class="row"><button type="submit">Save AI settings</button></div>
     </form>
-  </div>`;
+  </div>
+  <script>
+  (() => {
+    const catalog = ${catalogJson};
+    const hints = ${JSON.stringify(Object.fromEntries(AI_CATALOG.map((p) => [p.id, p.hint])))};
+    const provider = document.getElementById("aiProvider");
+    const model = document.getElementById("aiModel");
+    const hint = document.getElementById("aiProviderHint");
+    const saved = ${JSON.stringify(ai.model)};
+    function fillModels() {
+      const id = provider.value;
+      hint.textContent = id === "auto"
+        ? "Auto: original Gemini 3.5 Flash-Lite, then free Groq, then OpenRouter free. Paid OpenAI / gpt-4o are never used in Auto."
+        : (hints[id] || "");
+      const rows = id === "auto" ? [] : (catalog[id] || []);
+      let html = '<option value="">Default for this agent</option>';
+      for (const row of rows) {
+        html += '<option value="' + row.id + '"' + (row.id === saved ? " selected" : "") + ">" + row.label + "</option>";
+      }
+      if (saved && id !== "auto" && !rows.some((r) => r.id === saved)) {
+        html += '<option value="' + saved + '" selected>' + saved + " (custom)</option>";
+      }
+      model.innerHTML = html;
+      model.disabled = id === "auto";
+    }
+    provider.addEventListener("change", fillModels);
+    fillModels();
+  })();
+  </script>`;
 }
 
 function timerForm(action: string, hidden: string, minutes: number | null): string {
@@ -836,6 +1341,70 @@ function looksBadNotice(text: string): boolean {
   return /\b(no |not |could not|couldn't|cannot|can't|failed|error|empty|too long|already |is a built-in|cannot be removed|does not exist|named "|pick |use letters)/i.test(
     text,
   );
+}
+
+function terminalBody(): string {
+  return `<div class="card terminal-card">
+    <div class="card-head">
+      <h2>Terminal</h2>
+      <div class="row" style="margin:0">
+        <a class="btn ghost" href="/terminal">Refresh</a>
+        <button type="button" class="btn danger" id="term-clear">Clear</button>
+      </div>
+    </div>
+    <p class="muted">Live bot activity — orders, AI thinking, timeouts, Discord, failures. Auto-updates.</p>
+    <div id="term-log" class="terminal-log" aria-live="polite"></div>
+  </div>
+  <script>
+  (function(){
+    const log = document.getElementById("term-log");
+    const clearBtn = document.getElementById("term-clear");
+    let lines = [];
+    let lastId = null;
+    let stickBottom = true;
+    function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+    function fmtTime(at){
+      const d = new Date(at);
+      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    }
+    function render(){
+      const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+      log.innerHTML = lines.map(l =>
+        '<div class="term-line ' + esc(l.level) + '"><span class="ts">' + esc(fmtTime(l.at)) +
+        '</span><span class="src">[' + esc(l.source) + ']</span>' + esc(l.text) + '</div>'
+      ).join("") || '<div class="term-line muted">Waiting for activity…</div>';
+      if (stickBottom || nearBottom) log.scrollTop = log.scrollHeight;
+    }
+    log.addEventListener("scroll", () => {
+      stickBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+    });
+    async function pull(full){
+      try {
+        const url = full || !lastId ? "/terminal/log" : "/terminal/log?after=" + encodeURIComponent(lastId);
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const data = await res.json();
+        const batch = Array.isArray(data) ? data : (data.lines || []);
+        if (!batch.length) return;
+        if (full) lines = batch;
+        else lines = lines.concat(batch);
+        if (lines.length > 400) lines = lines.slice(-400);
+        lastId = lines[lines.length - 1].id;
+        render();
+      } catch (_) {}
+    }
+    clearBtn.addEventListener("click", async () => {
+      try {
+        await fetch("/terminal/log", { method: "DELETE" });
+        lines = [];
+        lastId = null;
+        render();
+      } catch (_) {}
+    });
+    pull(true);
+    setInterval(() => pull(false), 1000);
+  })();
+  </script>`;
 }
 
 function adminBody(): string {
