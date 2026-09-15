@@ -1,7 +1,20 @@
 node_modules/
 dist/
+
+# Secrets & local env (never commit)
 .env
+.env.*
+!.env.example
+!.env.*.example
+
+# Runtime / auth data
 data/*.json
+data/*.pid
 data/tunnel-url.txt
+!data/.gitkeep
+
+# OS / logs / junk
 *.log
 .DS_Store
+Thumbs.db
+console.error(e))
