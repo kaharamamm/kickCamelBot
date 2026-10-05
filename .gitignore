@@ -11,6 +11,8 @@ dist/
 data/*.json
 data/*.pid
 data/tunnel-url.txt
+data/whatsapp-auth/
+data/whatsapp-avatars/
 !data/.gitkeep
 
 # OS / logs / junk

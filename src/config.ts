@@ -87,6 +87,10 @@ export const config = {
     postChannelId: process.env.DISCORD_POST_CHANNEL_ID?.trim() ?? "",
     alwaysReplyUserIds: [] as string[],
   },
+  whatsapp: {
+    /** Always available — QR link + allowlist; fails soft when unlinked. */
+    enabled: true,
+  },
 };
 
 export function assertReadyForAuth(): void {

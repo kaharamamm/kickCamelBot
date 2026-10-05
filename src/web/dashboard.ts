@@ -26,6 +26,9 @@ import { getDiscordRouting } from "../discord/settings.js";
 import { liveChatChannels, liveChatStatus } from "../kick/liveChat.js";
 import { EMOTE_MOODS, listEmotesForUi } from "../bot/kickEmotes.js";
 import { getEmoteMoodOverrides } from "../bot/emoteMoodStore.js";
+import { whatsappStatus } from "../whatsapp/client.js";
+import { listWhatsAppEmojisForUi } from "../whatsapp/emotes.js";
+import { whatsappAvatarColor, whatsappAvatarSrc, whatsappInitials } from "../whatsapp/avatars.js";
 
 export type DashTab =
   | "status"
@@ -36,6 +39,7 @@ export type DashTab =
   | "recap"
   | "admin"
   | "discord"
+  | "whatsapp"
   | "terminal"
   | "emotes";
 
@@ -66,6 +70,8 @@ export async function dashboardPage(params: {
                 ? adminBody()
                 : params.tab === "discord"
                   ? await discordBody()
+                  : params.tab === "whatsapp"
+                    ? await whatsappBody()
                   : params.tab === "terminal"
                     ? terminalBody()
                     : params.tab === "emotes"
@@ -83,10 +89,10 @@ function layout(tab: DashTab, notice: string, inner: string, noticeBad = false):
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body { margin: 0; font: 15px/1.5 system-ui, sans-serif; background: #0b0b0d; color: #ececec; }
-  body.emotes-page main { max-width: 90rem; overflow: hidden; display: flex; flex-direction: column; }
-  body.emotes-page .emote-shell { flex: 1; min-height: 0; display: flex; flex-direction: column; margin-bottom: 0; overflow: hidden; }
+  body.emotes-page main { max-width: 90rem; overflow: auto; display: block; }
+  body.emotes-page .emote-shell { display: block; margin-bottom: 1rem; overflow: visible; }
   body.emotes-page .emote-shell-head { flex-shrink: 0; }
-  body.emotes-page .emote-grid-scroll { flex: 1; min-height: 0; overflow: auto; padding-right: .25rem; margin-top: .75rem; }
+  body.emotes-page .emote-grid-scroll { overflow: visible; padding-right: 0; margin-top: .75rem; max-height: none; }
   header { border-bottom: 1px solid #2c2c33; background: #121216; flex-shrink: 0; }
   .bar { max-width: 72rem; margin: 0 auto; padding: 1rem 1.2rem .15rem; }
   h1 { margin: 0; font-size: 1.45rem; }
@@ -131,7 +137,8 @@ function layout(tab: DashTab, notice: string, inner: string, noticeBad = false):
   select { min-width: 7.2rem; flex-shrink: 0; }
   body.tall-page { overflow: hidden; display: flex; flex-direction: column; }
   body.tall-page main { width: 100%; max-width: 72rem; align-self: center; flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; padding-bottom: 1rem; }
-  body.tall-page.emotes-page main { max-width: 90rem; }
+  body.tall-page.emotes-page { overflow: auto; }
+  body.tall-page.emotes-page main { max-width: 90rem; overflow: auto; display: block; height: auto; flex: none; padding-bottom: 3rem; }
   body.tall-page .tall-card { width: 100%; flex: 1; min-height: 0; display: flex; flex-direction: column; margin-bottom: 0; }
   body.ai-page .ai-form { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: .45rem; margin-top: .5rem; }
   body.ai-page .ai-form textarea[name=personality] { flex: 1.6; min-height: 8rem; resize: none; }
@@ -201,9 +208,57 @@ function layout(tab: DashTab, notice: string, inner: string, noticeBad = false):
   .emote-card .ename { font-size: 13px; font-weight: 650; text-align: center; word-break: break-word; }
   .emote-card .edef { font-size: 11px; color: #6a6a74; text-align: center; }
   .emote-card select { width: 100%; font-size: 13px; }
+  .emote-card.wa-emote-card .wa-glyph { font-size: 2rem; line-height: 1.2; text-align: center; }
+  .emote-card.wa-emote-card.off { opacity: .45; border-style: dashed; }
+  .emote-card.wa-emote-card select + select { margin-top: .25rem; }
   .emote-counts { display: flex; flex-wrap: wrap; gap: .4rem; margin: 0 0 1rem; }
   .emote-counts span { background: #121216; border: 1px solid #2c2c33; border-radius: 999px; padding: .2rem .55rem; font-size: 12px; color: #b0b0b8; }
   .emote-counts span b { color: #53fc18; }
+  .wa-row { display: flex; align-items: center; gap: .55rem; padding: .55rem .65rem !important; border-bottom: 1px solid #1f2c34 !important; background: transparent; transition: background .12s; }
+  .wa-row:hover { background: #202c33; }
+  .wa-row .check.grow { flex: 1; min-width: 0; margin: 0; align-items: center; gap: .7rem; }
+  .wa-avatar {
+    width: 48px; height: 48px; border-radius: 50%; flex-shrink: 0; object-fit: cover;
+    background: #2a3942; display: inline-flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 15px; color: #fff; overflow: hidden; position: relative;
+  }
+  .wa-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .wa-avatar .ph { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+  .wa-meta { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: .1rem; }
+  .wa-meta .wa-name { font-weight: 650; color: #e9edef; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .wa-meta .wa-about { color: #8696a0; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .wa-meta .wa-jid { display: none; }
+  .wa-panel { background: #111b21; border: 1px solid #2a3942; border-radius: 14px; overflow: hidden; padding: 0; }
+  .wa-panel-head { background: #202c33; padding: .75rem 1rem; border-bottom: 1px solid #2a3942; }
+  .wa-panel-head h2 { margin: 0; color: #e9edef; font-size: 1rem; }
+  .wa-panel-head p { margin: .25rem 0 0; color: #8696a0; font-size: 12px; }
+  .wa-panel .wa-search { width: calc(100% - 1.6rem); margin: .7rem .8rem; background: #202c33; border: 0; color: #e9edef; border-radius: 8px; padding: .55rem .75rem; }
+  .wa-panel ul.list { margin: 0; max-height: 28rem; overflow: auto; background: #111b21; }
+  .wa-panel ul.list li { border-bottom-color: #1f2c34; padding: 0; }
+  .wa-panel ul.list li:last-child { border-bottom: 0; }
+  .wa-me {
+    display: flex; align-items: center; gap: .9rem; padding: 1rem 1.1rem;
+    background: linear-gradient(180deg, #1f2c34 0%, #111b21 100%);
+    border: 1px solid #2a3942; border-radius: 16px;
+  }
+  .wa-me .wa-avatar { width: 64px; height: 64px; font-size: 20px; }
+  .wa-me .wa-name { font-size: 1.15rem; font-weight: 700; color: #e9edef; }
+  .wa-me .wa-about { color: #8696a0; font-size: 13px; margin-top: .15rem; }
+  .wa-me .wa-badges { display: flex; gap: .35rem; flex-wrap: wrap; margin-top: .45rem; }
+  .wa-remove { flex-shrink: 0; background: transparent; color: #ff8a8a; border: 1px solid #5a2a2a; border-radius: 8px; padding: .35rem .45rem; cursor: pointer; line-height: 0; }
+  .wa-remove:hover { background: #2a1515; }
+  .wa-remove svg { width: 16px; height: 16px; display: block; }
+  .wa-actions { display: flex; gap: .35rem; align-items: center; flex-shrink: 0; padding-right: .35rem; }
+  .wa-actions form { margin: 0; }
+  .wa-test { flex-shrink: 0; background: #1a1a20; color: #b8f0a0; border: 1px solid #2f4a28; border-radius: 8px; padding: .3rem .55rem; cursor: pointer; font-size: 12px; }
+  .wa-test:hover { background: #1f2a1c; }
+  .wa-emoji-section { margin: 1rem 0 1.25rem; }
+  .wa-emoji-section h3 { margin: 0 0 .55rem; font-size: .88rem; color: #c8c8d0; text-transform: capitalize; }
+  .wa-emoji-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(4.6rem, 1fr)); gap: .45rem; }
+  .wa-emoji-card { background: #121216; border: 1px solid #2c2c33; border-radius: 12px; padding: .5rem .3rem; text-align: center; display: flex; flex-direction: column; gap: .15rem; align-items: center; }
+  .wa-emoji-card .glyph { font-size: 1.65rem; line-height: 1.2; }
+  .wa-emoji-card .meta { font-size: 10px; color: #8a8a94; }
+  .wa-emoji-card.learned { border-color: #3a5a2a; }
 </style></head><body class="${
     tab === "ai" || tab === "mod" || tab === "memory" || tab === "admin" || tab === "terminal" || tab === "emotes"
       ? `tall-page${tab === "ai" ? " ai-page" : tab === "admin" ? " admin-page" : tab === "terminal" ? " terminal-page" : tab === "emotes" ? " emotes-page" : ""}`
@@ -221,6 +276,7 @@ function layout(tab: DashTab, notice: string, inner: string, noticeBad = false):
     <a class="${tab === "admin" ? "on" : ""}" href="/admin">Admin</a>
     <a class="${tab === "terminal" ? "on" : ""}" href="/terminal">Terminal</a>
     <a class="${tab === "discord" ? "on" : ""}" href="/discord">Discord</a>
+    <a class="${tab === "whatsapp" ? "on" : ""}" href="/whatsapp">WhatsApp</a>
     <a class="${tab === "emotes" ? "on" : ""}" href="/emotes">Emojis</a>
   </nav>
 </header>
@@ -232,6 +288,7 @@ function layout(tab: DashTab, notice: string, inner: string, noticeBad = false):
 
 function statusBody(authorized: boolean, botAccount?: string): string {
   const settings = getSettings();
+  const wa = whatsappStatus();
   const homeSlug = liveChatChannels[0] ?? "";
   const listed = [...new Set([homeSlug, ...liveChatChannels, ...extraChannelSlugs()].filter(Boolean))];
   const channelRows = listed
@@ -249,6 +306,14 @@ function statusBody(authorized: boolean, botAccount?: string): string {
     })
     .join("");
 
+  const waLine = wa.ready
+    ? wa.paused
+      ? `<span class="warn">paused${wa.phone ? ` (+${escapeHtml(wa.phone)})` : ""} · ${wa.allowlist.length} groups</span>`
+      : `<span class="ok">linked${wa.phone ? ` +${escapeHtml(wa.phone)}` : ""} · ${wa.allowlist.length} allowlisted</span>`
+    : wa.qrDataUrl
+      ? '<span class="warn">scan QR on WhatsApp tab</span>'
+      : '<span class="warn">not linked</span>';
+
   return `
   <div class="split">
   <div class="card">
@@ -261,6 +326,7 @@ function statusBody(authorized: boolean, botAccount?: string): string {
       <p>Posts as: ${botAccount ? `<span class="ok">${escapeHtml(botAccount)}</span>` : '<span class="warn">streamer account</span>'}</p>
       <p>AI: ${anyAiConfigured() ? '<span class="ok">online</span>' : '<span class="warn">off — add a key in .env</span>'}</p>
       <p>Live chat: ${liveChatStatus.startsWith("listening") ? `<span class="ok">${escapeHtml(liveChatStatus)}</span>` : `<span class="warn">${escapeHtml(liveChatStatus)}</span>`}</p>
+      <p>WhatsApp: ${waLine} — <a href="/whatsapp">open</a></p>
       <p>Mod /clear + chat modes: <span class="ok">streamer site session_token</span> (OAuth cannot run these)</p>
     </div>
     <p class="muted">Chat uses Kick's live socket. Follows, subs, gifts, and title changes need the Cloudflare webhook tunnel.</p>
@@ -334,6 +400,261 @@ function statusBody(authorized: boolean, botAccount?: string): string {
   </div>
   </div>
   </div>`;
+}
+
+async function whatsappBody(): Promise<string> {
+  const w = whatsappStatus();
+  const trashSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>`;
+
+  const aboutFor = (id: string) =>
+    w.knownGroups.find((g) => g.id === id)?.about ||
+    w.knownChats.find((c) => c.id === id)?.about ||
+    "";
+
+  const nameFor = (id: string) =>
+    w.knownGroups.find((g) => g.id === id)?.name ||
+    w.knownChats.find((c) => c.id === id)?.name ||
+    id;
+
+  const kindFor = (id: string) =>
+    w.knownGroups.some((g) => g.id === id) ? "group" : w.knownChats.some((c) => c.id === id) ? "chat" : "chat";
+
+  const avatarHtml = (id: string, name: string) => {
+    const initials = escapeHtml(whatsappInitials(name));
+    const color = whatsappAvatarColor(id || name);
+    const src = escapeHtml(whatsappAvatarSrc(id));
+    return `<span class="wa-avatar" style="background:${color}" aria-hidden="true">
+      <span class="ph">${initials}</span>
+      <img src="${src}" alt="" loading="lazy" onload="this.previousElementSibling.style.display='none'" onerror="this.remove()">
+    </span>`;
+  };
+
+  const metaHtml = (name: string, about: string, badges = "") => {
+    const subtitle = about.trim() || "WhatsApp chat";
+    return `<span class="wa-meta">
+      <span class="wa-name">${escapeHtml(name)}${badges}</span>
+      <span class="wa-about">${escapeHtml(subtitle)}</span>
+    </span>`;
+  };
+
+  const row = (id: string, name: string, allowed: boolean, about = "", self = false) => {
+    const hay = `${name} ${about} ${id} you self message`.toLowerCase();
+    const badges = self ? ' <span class="tag">you</span>' : "";
+    return `<li class="wa-row" data-q="${escapeHtml(hay)}" data-id="${escapeHtml(id)}">
+        <label class="check grow">
+          <input type="checkbox" name="allowlist" value="${escapeHtml(id)}" ${allowed ? "checked" : ""}>
+          ${avatarHtml(id, name)}
+          ${metaHtml(name, about || (self ? "Message yourself" : "Tap to allowlist"), badges)}
+        </label>
+      </li>`;
+  };
+
+  const groupRows = w.knownGroups.length
+    ? w.knownGroups.map((g) => row(g.id, g.name, g.allowed, g.about || "Group", false)).join("")
+    : `<li class="muted wa-empty" style="padding:1rem">No groups yet. Click <strong>Refresh lists</strong> after linking, or open a group on your phone.</li>`;
+
+  const chatRows = w.knownChats.length
+    ? w.knownChats
+        .map((c) =>
+          row(c.id, c.name, c.allowed, c.about || (c.self ? "Message yourself" : "Chat"), Boolean(c.self)),
+        )
+        .join("")
+    : `<li class="muted wa-empty" style="padding:1rem">No 1:1 chats yet. They appear after history sync or when someone messages. Use <strong>Refresh lists</strong> soon after linking.</li>`;
+
+  const allowlistedRows = w.allowlist.length
+    ? w.allowlist
+        .map((id) => {
+          const name = nameFor(id);
+          const kind = kindFor(id);
+          const about = aboutFor(id) || (kind === "group" ? "Group · allowlisted" : "Chat · allowlisted");
+          const self = Boolean(w.knownChats.find((c) => c.id === id)?.self);
+          const testBtn = w.ready
+            ? `<form method="post" action="/whatsapp/test"><input type="hidden" name="chatId" value="${escapeHtml(id)}"><button type="submit" class="wa-test" title="Send test to ${escapeHtml(name)}">Test</button></form>`
+            : "";
+          return `<li class="wa-row" data-id="${escapeHtml(id)}">
+            ${avatarHtml(id, name)}
+            ${metaHtml(name, about, self ? ' <span class="tag">you</span>' : ` <span class="tag dim">${kind}</span>`)}
+            <span class="wa-actions">
+              ${testBtn}
+              <button type="button" class="wa-remove" data-id="${escapeHtml(id)}" title="Remove from allowlist" aria-label="Remove ${escapeHtml(name)}">${trashSvg}</button>
+            </span>
+          </li>`;
+        })
+        .join("")
+    : `<li class="muted" style="padding:1rem">Nothing allowlisted yet. Tick groups/chats below and Save.</li>`;
+
+  const ageHint =
+    w.qrAgeSec != null
+      ? w.qrAgeSec >= 18
+        ? `<p class="warn">This QR is ${w.qrAgeSec}s old — wait for the next auto-refresh before scanning.</p>`
+        : `<p class="muted">QR age: ${w.qrAgeSec}s (scan quickly; code rotates ~every 20s).</p>`
+      : "";
+
+  const selfJid = w.phone ? `${w.phone}@s.whatsapp.net` : "";
+  const selfName = w.phone ? `+${w.phone}` : "WhatsApp";
+  const meBlock = w.ready
+    ? `<div class="wa-me">
+        ${avatarHtml(selfJid || "me", selfName)}
+        <div class="grow">
+          <div class="wa-name">${escapeHtml(selfName)}</div>
+          <div class="wa-about">Linked device · CamelBot companion</div>
+          <div class="wa-badges">
+            <span class="tag">linked</span>
+            ${w.paused ? '<span class="tag warn">paused</span>' : '<span class="tag">listening</span>'}
+            <span class="tag dim">${w.allowlist.length} allowlisted</span>
+            <span class="tag dim">${w.messagesSeen}/${w.repliesSent} seen/replies</span>
+          </div>
+        </div>
+      </div>
+      <p class="muted" style="margin-top:.8rem">Tick chats/groups below → Save allowlist. Unticked = silence. Groups need <code>bot</code> / <code>CamelBot</code> / <code>camel</code> (or a short follow-up). 1:1 DMs reply to every message.</p>
+      <div class="row">
+        <form method="post" action="/whatsapp/refresh"><button type="submit">Refresh lists</button></form>
+        <form method="post" action="/whatsapp/pause">
+          <input type="hidden" name="paused" value="${w.paused ? "0" : "1"}">
+          <button type="submit">${w.paused ? "Resume replies" : "Pause replies"}</button>
+        </form>
+        <form method="post" action="/whatsapp/unlink" onsubmit="return confirm('Unlink WhatsApp from CamelBot? You will need to scan QR again.');">
+          <button class="danger" type="submit">Unlink device</button>
+        </form>
+      </div>`
+    : w.qrDataUrl
+      ? `<p>Status: <span class="warn">scan QR now</span> — phone: Linked devices → Link a device</p>
+         <p class="muted">WhatsApp allows <strong>4 linked devices</strong> (not counting your phone).</p>
+         ${ageHint}
+         <p><img id="waQr" alt="WhatsApp QR" width="280" height="280" src="${escapeHtml(w.qrDataUrl)}" style="border-radius:12px;background:#fff;padding:8px"></p>
+         <p class="muted">This page auto-refreshes the code. Do not scan a frozen screenshot.</p>`
+      : `<p>Status: <span class="warn">waiting for QR…</span> (auto-refreshing)</p>`;
+
+  const autoRefresh =
+    w.ready
+      ? ""
+      : `<script>
+  (function () {
+    var last = ${JSON.stringify(w.qrDataUrl || "")};
+    async function tick() {
+      try {
+        var res = await fetch("/whatsapp/status", { headers: { Accept: "application/json" } });
+        var data = await res.json();
+        if (data.ready) { location.reload(); return; }
+        if (data.qrDataUrl && data.qrDataUrl !== last) {
+          last = data.qrDataUrl;
+          var img = document.getElementById("waQr");
+          if (img) img.src = data.qrDataUrl;
+          else location.reload();
+        }
+      } catch (e) {}
+      setTimeout(tick, 2500);
+    }
+    setTimeout(tick, 2500);
+  })();
+</script>`;
+
+  const searchScript = `<script>
+  (function () {
+    function bind(inputId, listId) {
+      var input = document.getElementById(inputId);
+      var list = document.getElementById(listId);
+      if (!input || !list) return;
+      input.addEventListener("input", function () {
+        var q = (input.value || "").trim().toLowerCase();
+        var rows = list.querySelectorAll("li.wa-row");
+        var shown = 0;
+        rows.forEach(function (li) {
+          var hay = li.getAttribute("data-q") || "";
+          var ok = !q || hay.indexOf(q) !== -1;
+          li.style.display = ok ? "" : "none";
+          if (ok) shown += 1;
+        });
+        var empty = list.querySelector("li.wa-filter-empty");
+        if (!empty) {
+          empty = document.createElement("li");
+          empty.className = "muted wa-filter-empty";
+          empty.style.padding = "1rem";
+          empty.textContent = "No matches.";
+          list.appendChild(empty);
+        }
+        empty.style.display = q && shown === 0 ? "" : "none";
+      });
+    }
+    bind("waGroupSearch", "waGroupList");
+    bind("waChatSearch", "waChatList");
+
+    document.addEventListener("click", function (ev) {
+      var btn = ev.target && ev.target.closest ? ev.target.closest("button.wa-remove") : null;
+      if (!btn) return;
+      var id = btn.getAttribute("data-id") || "";
+      if (!id) return;
+      if (!confirm("Remove from allowlist?")) return;
+      btn.disabled = true;
+      fetch("/whatsapp/remove", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+        body: "id=" + encodeURIComponent(id),
+      })
+        .then(function (res) { return res.json().catch(function () { return { ok: res.ok }; }); })
+        .then(function (data) {
+          if (!data || !data.ok) throw new Error("remove failed");
+          var li = btn.closest("li.wa-row");
+          if (li) li.remove();
+          var box = document.querySelector('input[name="allowlist"][value="' + id.replace(/"/g, '\\\\"') + '"]');
+          if (box) box.checked = false;
+          var list = document.getElementById("waAllowList");
+          if (list && !list.querySelector("li.wa-row")) {
+            list.innerHTML = '<li class="muted" style="padding:1rem">Nothing allowlisted yet. Tick groups/chats below and Save.</li>';
+          }
+        })
+        .catch(function () {
+          btn.disabled = false;
+          alert("Could not remove. Try again.");
+        });
+    });
+  })();
+</script>`;
+
+  return `
+  <div class="card">
+    <div class="card-head">
+      <h2>WhatsApp</h2>
+      <a class="btn" href="/whatsapp">Refresh page</a>
+    </div>
+    ${meBlock}
+    ${w.lastError ? `<p class="warn">${escapeHtml(w.lastError)}</p>` : ""}
+    ${autoRefresh}
+  </div>
+
+  <div class="wa-panel" style="margin-top:1rem">
+    <div class="wa-panel-head">
+      <h2>Allowlisted</h2>
+      <p>CamelBot may reply here. <strong>Test</strong> sends a check message; trash removes from allowlist only.</p>
+    </div>
+    <ul class="list" id="waAllowList">${allowlistedRows}</ul>
+  </div>
+
+  <form method="post" action="/whatsapp/settings">
+    <div class="split" style="margin-top:1rem">
+      <div class="wa-panel">
+        <div class="wa-panel-head">
+          <h2>Groups</h2>
+          <p>Tick friend groups you want CamelBot in.</p>
+        </div>
+        <input id="waGroupSearch" class="wa-search" type="search" placeholder="Search groups…" autocomplete="off">
+        <ul class="list" id="waGroupList">${groupRows}</ul>
+      </div>
+      <div class="wa-panel">
+        <div class="wa-panel-head">
+          <h2>Chats (1:1)</h2>
+          <p>Optional DMs. Leave unchecked unless you want private replies.</p>
+        </div>
+        <input id="waChatSearch" class="wa-search" type="search" placeholder="Search chats…" autocomplete="off">
+        <ul class="list" id="waChatList">${chatRows}</ul>
+      </div>
+    </div>
+    <div class="row" style="margin-top:.8rem">
+      <button type="submit">Save allowlist</button>
+      <span class="muted">Saves both panels together.</span>
+    </div>
+  </form>
+  ${searchScript}`;
 }
 
 async function discordBody(): Promise<string> {
@@ -1117,12 +1438,21 @@ function recapBody(): string {
 function emotesBody(): string {
   const rows = listEmotesForUi();
   const overrides = getEmoteMoodOverrides();
+  const waEmojis = listWhatsAppEmojisForUi();
   const counts: Record<string, number> = {};
   for (const mood of EMOTE_MOODS) counts[mood] = 0;
   for (const row of rows) counts[row.mood] = (counts[row.mood] ?? 0) + 1;
 
+  const waCounts: Record<string, number> = {};
+  for (const mood of EMOTE_MOODS) waCounts[mood] = 0;
+  for (const row of waEmojis) waCounts[row.mood] = (waCounts[row.mood] ?? 0) + 1;
+
   const countChips = EMOTE_MOODS.map(
     (m) => `<span data-mood-chip="${m}">${escapeHtml(m)} <b>${counts[m] ?? 0}</b></span>`,
+  ).join("");
+
+  const waCountChips = EMOTE_MOODS.map(
+    (m) => `<span data-mood-chip="${m}">${escapeHtml(m)} <b>${waCounts[m] ?? 0}</b></span>`,
   ).join("");
 
   const cards = rows
@@ -1145,11 +1475,56 @@ function emotesBody(): string {
     })
     .join("");
 
-  return `<div class="card emote-shell">
+  const waEnabled = waEmojis.filter((e) => e.enabled).length;
+  const waCards = waEmojis
+    .map((e) => {
+      const opts = EMOTE_MOODS.map(
+        (m) =>
+          `<option value="${m}" ${e.mood === m ? "selected" : ""}>${m}${
+            m === e.defaultMood ? " (default)" : ""
+          }</option>`,
+      ).join("");
+      const field = encodeURIComponent(e.emoji);
+      return `<label class="emote-card wa-emote-card${e.changed ? " changed" : ""}${e.enabled ? "" : " off"}" data-name="${escapeHtml(
+        e.emoji,
+      )}" data-mood="${e.mood}" data-platform="whatsapp">
+        <span class="wa-glyph" aria-hidden="true">${e.emoji}</span>
+        <span class="ename">${escapeHtml(e.source === "learned" ? "from chat" : "pool")}${
+          e.count > 0 ? ` · ${e.count}×` : ""
+        }</span>
+        <span class="edef">default: ${escapeHtml(e.defaultMood)}</span>
+        <select name="wa_mood_${field}">${opts}</select>
+        <select name="wa_on_${field}">
+          <option value="1"${e.enabled ? " selected" : ""}>enabled</option>
+          <option value="0"${e.enabled ? "" : " selected"}>disabled</option>
+        </select>
+      </label>`;
+    })
+    .join("");
+
+  return `<form id="emote-mood-form" method="post" action="/emotes">
+  <div class="card" style="margin-bottom:1rem">
+    <div class="card-head">
+      <h2>WhatsApp emoji · mood buckets</h2>
+      <button type="submit">Save all moods</button>
+    </div>
+    <p class="muted">Same mood buckets as Kick. Change mood or disable an emoji so CamelBot stops appending it. Green border = custom override / disabled. Learned-from-chat emoji appear after people use them (<code>data/whatsapp-emojis.json</code>). ${waEnabled}/${waEmojis.length} enabled.</p>
+    <div class="emote-counts">${waCountChips}</div>
+    <div class="emote-toolbar">
+      <input type="search" id="wa-emote-filter" placeholder="Filter WhatsApp emoji…" autocomplete="off">
+      <select id="wa-emote-mood-filter">
+        <option value="">All moods</option>
+        ${EMOTE_MOODS.map((m) => `<option value="${m}">${m}</option>`).join("")}
+      </select>
+    </div>
+    <div class="emote-grid" id="wa-emote-grid">${waCards || `<p class="muted">No WhatsApp emoji yet.</p>`}</div>
+  </div>
+
+  <div class="card emote-shell">
     <div class="emote-shell-head">
       <div class="card-head">
         <h2>Kick emotes · mood buckets</h2>
-        <button type="submit" form="emote-mood-form">Save moods</button>
+        <button type="submit">Save all moods</button>
       </div>
       <p class="muted">Moods follow Plutchik’s basics (happy, sad, angry, fear, surprise, disgust, trust, anticipation) plus Kick vibes (laugh, love, cool, confused, hype, dance). Change a listing to control which emotes get appended. Green border = custom override (<code>data/emote-moods.json</code>).</p>
       <div class="emote-counts">${countChips}</div>
@@ -1159,53 +1534,63 @@ function emotesBody(): string {
           <option value="">All moods</option>
           ${EMOTE_MOODS.map((m) => `<option value="${m}">${m}</option>`).join("")}
         </select>
-        <button type="button" id="emote-reset-defaults" class="ghost">Reset all to defaults</button>
+        <button type="button" id="emote-reset-defaults" class="ghost">Reset Kick to defaults</button>
       </div>
     </div>
-    <form id="emote-mood-form" method="post" action="/emotes" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
-      <div class="emote-grid-scroll">
-        <div class="emote-grid">${cards}</div>
-      </div>
-    </form>
+    <div class="emote-grid-scroll">
+      <div class="emote-grid">${cards}</div>
+    </div>
   </div>
+  </form>
   <script>
   (function () {
-    var filter = document.getElementById("emote-filter");
-    var moodFilter = document.getElementById("emote-mood-filter");
-    var resetBtn = document.getElementById("emote-reset-defaults");
-    function applyFilter() {
-      var q = (filter.value || "").trim().toLowerCase();
-      var mood = moodFilter.value || "";
-      document.querySelectorAll(".emote-card").forEach(function (card) {
-        var name = card.getAttribute("data-name") || "";
-        var m = card.querySelector("select");
-        var cur = m ? m.value : card.getAttribute("data-mood");
-        var ok = (!q || name.indexOf(q) !== -1) && (!mood || cur === mood);
-        card.style.display = ok ? "" : "none";
+    function bindFilter(filterId, moodId, cardSel) {
+      var filter = document.getElementById(filterId);
+      var moodFilter = document.getElementById(moodId);
+      function apply() {
+        var q = ((filter && filter.value) || "").trim().toLowerCase();
+        var mood = (moodFilter && moodFilter.value) || "";
+        document.querySelectorAll(cardSel).forEach(function (card) {
+          var name = card.getAttribute("data-name") || "";
+          var m = card.querySelector("select[name^='mood_'], select[name^='wa_mood_']");
+          var cur = m ? m.value : card.getAttribute("data-mood");
+          var ok = (!q || name.toLowerCase().indexOf(q) !== -1) && (!mood || cur === mood);
+          card.style.display = ok ? "" : "none";
+        });
+      }
+      if (filter) filter.addEventListener("input", apply);
+      if (moodFilter) moodFilter.addEventListener("change", apply);
+      document.querySelectorAll(cardSel + " select").forEach(function (sel) {
+        sel.addEventListener("change", function () {
+          var card = sel.closest(cardSel);
+          if (!card) return;
+          if (sel.name && (sel.name.indexOf("mood_") === 0 || sel.name.indexOf("wa_mood_") === 0)) {
+            card.setAttribute("data-mood", sel.value);
+          }
+          if (sel.name && sel.name.indexOf("wa_on_") === 0) {
+            if (sel.value === "1") card.classList.remove("off");
+            else card.classList.add("off");
+          }
+          apply();
+        });
       });
+      apply();
     }
-    if (filter) filter.addEventListener("input", applyFilter);
-    if (moodFilter) moodFilter.addEventListener("change", applyFilter);
-    document.querySelectorAll(".emote-card select").forEach(function (sel) {
-      sel.addEventListener("change", function () {
-        var card = sel.closest(".emote-card");
-        if (!card) return;
-        card.setAttribute("data-mood", sel.value);
-        applyFilter();
-      });
-    });
+    bindFilter("emote-filter", "emote-mood-filter", ".emote-card:not(.wa-emote-card)");
+    bindFilter("wa-emote-filter", "wa-emote-mood-filter", ".wa-emote-card");
+
+    var resetBtn = document.getElementById("emote-reset-defaults");
     if (resetBtn) resetBtn.addEventListener("click", function () {
-      document.querySelectorAll(".emote-card").forEach(function (card) {
+      document.querySelectorAll(".emote-card:not(.wa-emote-card)").forEach(function (card) {
         var def = (card.querySelector(".edef") || {}).textContent || "";
         var mood = (def.match(/default:\\s*(\\w+)/) || [])[1];
-        var sel = card.querySelector("select");
+        var sel = card.querySelector("select[name^='mood_']");
         if (sel && mood) {
           sel.value = mood;
           card.setAttribute("data-mood", mood);
           card.classList.remove("changed");
         }
       });
-      applyFilter();
     });
   })();
   </script>`;

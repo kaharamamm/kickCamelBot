@@ -32,6 +32,19 @@ import { parseAlwaysReplyJson, parseRoutesJson, routesFromUnknown, alwaysReplyFr
 import { synthesizeSpeech } from "./discord/speech.js";
 import { joinVoiceByIds, leaveVoice, speakInGuild } from "./discord/voice.js";
 import { saveVoicePrefs, type TtsVoiceId } from "./discord/voicePrefs.js";
+import {
+  sendWhatsAppTest,
+  startWhatsApp,
+  refreshWhatsAppDirectory,
+  unlinkWhatsApp,
+  whatsappStatus,
+} from "./whatsapp/client.js";
+import {
+  parseAllowlistForm,
+  removeFromWhatsAppAllowlist,
+  setWhatsAppAllowlist,
+  setWhatsAppPaused,
+} from "./whatsapp/settings.js";
 import { isPrivateDashboardHost } from "./bot/lan.js";
 import { setCommandTimer } from "./bot/commandTimers.js";
 import { RESERVED_COMMANDS } from "./bot/commands.js";
@@ -93,6 +106,7 @@ export function createServer() {
         liveChat: liveChatStatus,
         channels: liveChatChannels,
         discord: await discordStatus(),
+        whatsapp: whatsappStatus(),
       });
     })().catch((err) => {
       console.error("[health]", err);
@@ -131,27 +145,72 @@ export function createServer() {
   app.get("/admin", (req, res) => sendDash(req, res, "admin"));
   app.get("/terminal", (req, res) => sendDash(req, res, "terminal"));
   app.get("/discord", (req, res) => sendDash(req, res, "discord"));
+  app.get("/whatsapp", (req, res) => sendDash(req, res, "whatsapp"));
+  app.get("/whatsapp/status", (_req, res) => {
+    res.json(whatsappStatus());
+  });
+  app.get("/whatsapp/avatar", (req, res) => {
+    void (async () => {
+      const jid = String(req.query.jid ?? "").trim();
+      if (!jid || !jid.includes("@")) {
+        res.status(400).end();
+        return;
+      }
+      const { getWhatsAppAvatar } = await import("./whatsapp/avatars.js");
+      const pic = await getWhatsAppAvatar(jid);
+      if (!pic) {
+        res.status(404).end();
+        return;
+      }
+      res.setHeader("Content-Type", pic.contentType);
+      res.setHeader("Cache-Control", "private, max-age=3600");
+      res.send(pic.buf);
+    })().catch(() => {
+      res.status(404).end();
+    });
+  });
   app.get("/emotes", (req, res) => sendDash(req, res, "emotes"));
 
   app.post("/emotes", express.urlencoded({ extended: false }), (req, res) => {
     void (async () => {
       const { EMOTE_MOODS, saveEmoteMoodsFromUi } = await import("./bot/kickEmotes.js");
+      const { saveWhatsAppEmojiMoodsFromUi } = await import("./whatsapp/emotes.js");
       type EmoteMood = (typeof EMOTE_MOODS)[number];
       const assignments: Record<string, EmoteMood> = {};
+      const waAssignments: Record<string, EmoteMood> = {};
+      const waEnabled: Record<string, boolean> = {};
       for (const [key, value] of Object.entries(req.body ?? {})) {
-        if (!key.startsWith("mood_")) continue;
-        const name = key.slice("mood_".length);
-        const mood = String(value);
-        if ((EMOTE_MOODS as string[]).includes(mood)) assignments[name] = mood as EmoteMood;
+        if (key.startsWith("mood_")) {
+          const name = key.slice("mood_".length);
+          const mood = String(value);
+          if ((EMOTE_MOODS as string[]).includes(mood)) assignments[name] = mood as EmoteMood;
+        } else if (key.startsWith("wa_mood_")) {
+          let emoji = key.slice("wa_mood_".length);
+          try {
+            emoji = decodeURIComponent(emoji);
+          } catch {
+            /* keep raw */
+          }
+          const mood = String(value);
+          if ((EMOTE_MOODS as string[]).includes(mood)) waAssignments[emoji] = mood as EmoteMood;
+        } else if (key.startsWith("wa_on_")) {
+          let emoji = key.slice("wa_on_".length);
+          try {
+            emoji = decodeURIComponent(emoji);
+          } catch {
+            /* keep raw */
+          }
+          waEnabled[emoji] = String(value) === "1" || String(value) === "on" || String(value) === "true";
+        }
       }
       const changed = saveEmoteMoodsFromUi(assignments);
-      res.redirect(
-        `/emotes?notice=${encodeURIComponent(
-          changed
-            ? `Saved ${changed} mood override${changed === 1 ? "" : "s"}.`
-            : "All moods match defaults — overrides cleared.",
-        )}`,
-      );
+      const waChanged = saveWhatsAppEmojiMoodsFromUi(waAssignments, waEnabled);
+      const bits: string[] = [];
+      if (changed) bits.push(`${changed} Kick override${changed === 1 ? "" : "s"}`);
+      else bits.push("Kick moods match defaults");
+      if (waChanged) bits.push(`WhatsApp emoji updated`);
+      else bits.push("WhatsApp emoji unchanged");
+      res.redirect(`/emotes?notice=${encodeURIComponent(bits.join(" · "))}`);
     })().catch((err) => {
       const msg = err instanceof Error ? err.message : String(err);
       res.redirect(`/emotes?error=${encodeURIComponent(msg)}`);
@@ -208,6 +267,80 @@ export function createServer() {
     })().catch((err) => {
       const msg = err instanceof Error ? err.message : "Lookup failed";
       res.status(500).json({ ok: false, error: msg });
+    });
+  });
+
+  app.post("/whatsapp/settings", express.urlencoded({ extended: false }), (req, res) => {
+    const allowlist = parseAllowlistForm(req.body);
+    setWhatsAppAllowlist(allowlist);
+    res.redirect(
+      `/whatsapp?notice=${encodeURIComponent(
+        allowlist.length
+          ? `Allowlist saved (${allowlist.length} chat${allowlist.length === 1 ? "" : "s"}). Everything else is ignored.`
+          : "Allowlist cleared — CamelBot will not reply on WhatsApp until you tick groups.",
+      )}`,
+    );
+  });
+
+  app.post("/whatsapp/remove", express.urlencoded({ extended: false }), (req, res) => {
+    const id = String(req.body.id ?? "").trim();
+    if (!id) {
+      res.redirect(`/whatsapp?error=${encodeURIComponent("Missing chat id.")}`);
+      return;
+    }
+    removeFromWhatsAppAllowlist(id);
+    const wantsJson = String(req.headers.accept ?? "").includes("application/json");
+    if (wantsJson) {
+      res.json({ ok: true, id });
+      return;
+    }
+    res.redirect(`/whatsapp?notice=${encodeURIComponent("Removed from allowlist.")}`);
+  });
+
+  app.post("/whatsapp/pause", express.urlencoded({ extended: false }), (req, res) => {
+    const paused = String(req.body.paused ?? "") === "1";
+    setWhatsAppPaused(paused);
+    res.redirect(
+      `/whatsapp?notice=${encodeURIComponent(paused ? "WhatsApp replies paused." : "WhatsApp replies resumed.")}`,
+    );
+  });
+
+  app.post("/whatsapp/refresh", express.urlencoded({ extended: false }), (_req, res) => {
+    void (async () => {
+      const counts = await refreshWhatsAppDirectory();
+      res.redirect(
+        `/whatsapp?notice=${encodeURIComponent(
+          `Lists refreshed: ${counts.groups} group(s), ${counts.chats} chat(s). Tick what you want, then Save allowlist.`,
+        )}`,
+      );
+    })().catch((err) => {
+      const msg = err instanceof Error ? err.message : "Refresh failed";
+      res.redirect(`/whatsapp?error=${encodeURIComponent(msg)}`);
+    });
+  });
+
+  app.post("/whatsapp/unlink", express.urlencoded({ extended: false }), (_req, res) => {
+    void (async () => {
+      await unlinkWhatsApp();
+      res.redirect(`/whatsapp?notice=${encodeURIComponent("WhatsApp unlinked. Scan the new QR when it appears.")}`);
+    })().catch((err) => {
+      const msg = err instanceof Error ? err.message : "Unlink failed";
+      res.redirect(`/whatsapp?error=${encodeURIComponent(msg)}`);
+    });
+  });
+
+  app.post("/whatsapp/test", express.urlencoded({ extended: false }), (req, res) => {
+    void (async () => {
+      const chatId = String(req.body.chatId ?? "").trim();
+      const result = await sendWhatsAppTest(chatId);
+      if (!result.ok) {
+        res.redirect(`/whatsapp?error=${encodeURIComponent(result.error || "Test send failed")}`);
+        return;
+      }
+      res.redirect(`/whatsapp?notice=${encodeURIComponent("Test message sent to the allowlisted group.")}`);
+    })().catch((err) => {
+      const msg = err instanceof Error ? err.message : "Test send failed";
+      res.redirect(`/whatsapp?error=${encodeURIComponent(msg)}`);
     });
   });
 
@@ -748,6 +881,11 @@ export async function bootIntegrations(): Promise<void> {
     await startDiscord();
   } catch (err) {
     console.warn("[discord] failed to start", err);
+  }
+  try {
+    await startWhatsApp();
+  } catch (err) {
+    console.warn("[whatsapp] failed to start", err);
   }
   if (loadTokens()) {
     await rememberBotIdentity();

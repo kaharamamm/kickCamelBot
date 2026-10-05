@@ -12,6 +12,8 @@ import { weatherCached, yenimahalleWeather } from "./weather.js";
 import { buildSystemPrompt } from "./settings.js";
 import { anyAiConfigured, completeAi, type AiSpeed } from "./aiProviders.js";
 import { maybeAppendMoodEmote } from "./kickEmotes.js";
+import { formatWhatsAppOutgoing } from "../whatsapp/emotes.js";
+import { maybeSanitizeWhatsAppReply, whatsAppSafetyPrompt } from "../whatsapp/safety.js";
 
 const history = new Map<string, Array<{ role: "user" | "model"; text: string }>>();
 const lastAiAt = new Map<number, number>();
@@ -136,6 +138,8 @@ export async function replyWithAi(
     voiceReply?: boolean;
     /** Last line the bot spoke/wrote on Discord — for “say it again” context. */
     lastSpoken?: string;
+    /** Reply destination — controls emote format (Kick tokens vs WhatsApp emoji). */
+    platform?: "kick" | "whatsapp" | "discord";
   },
 ): Promise<string | null> {
   if (!anyAiConfigured()) return null;
@@ -159,8 +163,9 @@ export async function replyWithAi(
   const roomId = chat.broadcaster?.user_id;
   const last10 = greeting || !roomId ? "" : formatLastChat(roomId, 10);
   const roomMemory = greeting || !roomId ? "" : chatSummary(roomId);
+  const isWhatsApp = extra?.platform === "whatsapp";
   // Do NOT inject the full Kick emote catalog into the prompt — it makes the model slow.
-  // Code appends a mood emote after the reply via maybeAppendMoodEmote.
+  // Code appends mood flair after the reply (Kick tokens or WhatsApp emoji).
   const prompt = [
     "Answer using this priority. Higher wins if they conflict:",
     "1) THIS CONVERSATION with them",
@@ -206,7 +211,10 @@ export async function replyWithAi(
       : "",
     extra?.voiceReply
       ? "VOICE REPLY: Speakable words only. No *actions*, no emotes, no emoji, no markdown. One short spoken sentence."
-      : "MOST replies: start with ONE *emotion/action* like *gözlerini devirir* THEN a full sentence (always close stars). Do NOT invent Kick emote ids or paste fake [emote:…] — code appends a real mood emote after you.",
+      : isWhatsApp
+        ? "WHATSAPP reply: start with ONE *emotion/action* like *gözlerini devirir* THEN a full sentence (always close stars). Use normal Unicode emoji only if you want — NEVER Kick [emote:…] tokens. Code may append one WhatsApp-style emoji after you."
+        : "MOST replies: start with ONE *emotion/action* like *gözlerini devirir* THEN a full sentence (always close stars). Do NOT invent Kick emote ids or paste fake [emote:…] — code appends a real mood emote after you.",
+    isWhatsApp ? whatsAppSafetyPrompt(chat.content, extra?.lang) : "",
     extra?.lastSpoken
       ? `YOUR LAST SPOKEN/TEXT LINE (for repeat/follow-up): ${extra.lastSpoken}`
       : "",
@@ -217,7 +225,9 @@ export async function replyWithAi(
     memory ? `[5 PERSON] ${memory}` : "[5 PERSON] (none)",
     extra?.voiceReply
       ? "Write one complete spoken sentence. No *actions*. No emotes."
-      : "Write one complete Kick chat reply. Prefer *action* + sentence. Keep it snappy. ALWAYS answer [2].",
+      : isWhatsApp
+        ? "Write one complete WhatsApp message. Prefer *action* + sentence. Keep it snappy. ALWAYS answer [2]."
+        : "Write one complete Kick chat reply. Prefer *action* + sentence. Keep it snappy. ALWAYS answer [2].",
   ]
     .filter(Boolean)
     .join("\n");
@@ -237,7 +247,15 @@ export async function replyWithAi(
     return extra?.force ? null : busyFallback(extra?.lang);
   }
   const cleaned = enforceReplyLang(stripBotTags(text) || text, extra?.lang);
-  const withEmote = extra?.voiceReply ? cleaned : maybeAppendMoodEmote(cleaned);
+  let withEmote = cleaned;
+  if (!extra?.voiceReply) {
+    if (extra?.platform === "whatsapp") {
+      const safe = maybeSanitizeWhatsAppReply(cleaned, chat.content, extra?.lang);
+      withEmote = formatWhatsAppOutgoing(safe, chat.content);
+    } else {
+      withEmote = maybeAppendMoodEmote(cleaned);
+    }
+  }
   rememberAiTurn(userKey, chat.content, withEmote);
   botThink("chat", `Reply → ${withEmote.slice(0, 140)}`);
   return withEmote;
