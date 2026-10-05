@@ -1,6 +1,7 @@
 import { getContentType, jidNormalizedUser, type WAMessage } from "@whiskeysockets/baileys";
 import { calledTheBot, looksLikeQuestion, shouldTalkToAi } from "../bot/ai.js";
 import { config } from "../config.js";
+import { parseWhatsAppDrawRequest } from "./draw.js";
 
 /** Bot-address cues (CamelBot / camel / bot…), same spirit as Kick. */
 export function hasWhatsAppBotCue(content: string): boolean {
@@ -19,7 +20,12 @@ export function hasWhatsAppBotCue(content: string): boolean {
  */
 export function meantForWhatsAppBot(content: string): boolean {
   const t = content.replace(/\s+/g, " ").trim();
-  if (!t || !hasWhatsAppBotCue(t)) return false;
+  if (!t) return false;
+
+  // Draw/çiz orders always count — execute the command even if wording is messy
+  if (parseWhatsAppDrawRequest(t)) return true;
+
+  if (!hasWhatsAppBotCue(t)) return false;
 
   // Direct address at start: "bot …", "CamelBot …", "@camel …"
   if (
@@ -35,7 +41,7 @@ export function meantForWhatsAppBot(content: string): boolean {
   if (looksLikeQuestion(t)) return true;
   if (
     /\b(bot|camelbot|camel)\b/i.test(t) &&
-    /\b(söyle|soyle|anlat|yap|bak|gel|cevapla|cevap|answer|reply|tell|say|what|why|how|who|when|where|ne |niye|neden|nasıl|nasil|kim|kaç|kac|kaçta|kacta)\b/i.test(
+    /\b(söyle|soyle|anlat|yap|bak|gel|cevapla|cevap|answer|reply|tell|say|what|why|how|who|when|where|ne |niye|neden|nasıl|nasil|kim|kaç|kac|kaçta|kacta|çiz|ciz|draw)\b/i.test(
       t,
     )
   ) {
@@ -104,6 +110,8 @@ export function shouldReplyInWhatsAppGroup(params: {
   continuing: boolean;
 }): boolean {
   if (params.continuing) return true;
+  // Commands like çiz/draw always wake the bot in allowlisted groups
+  if (parseWhatsAppDrawRequest(params.content)) return true;
   if (!hasWhatsAppBotCue(params.content)) return false;
   // Tagged the human: only if they also used bot cues (already required) and meant the bot
   if (params.taggedOwner) return meantForWhatsAppBot(params.content);

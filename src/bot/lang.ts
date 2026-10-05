@@ -115,53 +115,27 @@ function scoreWord(raw: string): { tr: number; en: number } {
 }
 
 /**
- * Pick reply language by counting Turkish vs English signals across the whole sentence.
- * More Turkish weight → tr; more English → en. Ties keep the user's last language (default tr).
+ * Pick reply language.
+ * TEMP: always Turkish — English detection was misfiring on mixed/Turkish chat.
+ * (Re-enable full English when detector is reliable again.)
  */
 export function detectLang(text: string, userId?: number): ChatLang {
   const sample = text.replace(/https?:\/\/\S+/g, " ").replace(/@\w+/g, " ").trim();
   if (/[\u0600-\u06FF\u3040-\u30ff\u3400-\u9fff\u0400-\u04FF\u0900-\u097F\u0E00-\u0E7F]/.test(sample)) {
     return "other";
   }
-
-  const tokens = tokenize(sample);
-  const contentTokens = tokens.filter((t) => !IGNORE.has(foldToken(t)));
-
-  // Very short address-only pings keep prior language ("camel", "bot")
-  if (contentTokens.length === 0) {
-    return (userId && lastLang.get(userId)) || "tr";
-  }
-
-  let trScore = 0;
-  let enScore = 0;
-  for (const tok of contentTokens) {
-    const s = scoreWord(tok);
-    trScore += s.tr;
-    enScore += s.en;
-  }
-
-  let guessed: ChatLang;
-  if (trScore === 0 && enScore === 0) {
-    // No lexicon hits — use alphabet hints
-    if (contentTokens.some(hasTurkishLetters)) guessed = "tr";
-    else if (contentTokens.some((t) => /[A-Za-z]/.test(t))) guessed = "en";
-    else guessed = (userId && lastLang.get(userId)) || "tr";
-  } else if (trScore > enScore) guessed = "tr";
-  else if (enScore > trScore) guessed = "en";
-  else guessed = (userId && lastLang.get(userId)) || (contentTokens.some(hasTurkishLetters) ? "tr" : "en");
-
-  if (userId && guessed !== "other") lastLang.set(userId, guessed);
-  return guessed;
+  if (userId) lastLang.set(userId, "tr");
+  return "tr";
 }
 
 export function langInstruction(lang: ChatLang): string {
-  if (lang === "tr") return "Reply ONLY in Turkish. Do not switch to English.";
-  if (lang === "en") return "Reply ONLY in English. Do not switch to Turkish unless they mixed.";
-  return "They did not write Turkish or English.";
+  if (lang === "en") return "Their message is FULL English. Reply ONLY in English. Do not switch to Turkish.";
+  if (lang === "other") return "They did not write Turkish or English.";
+  return "DEFAULT LANGUAGE IS TURKISH. Reply ONLY in Turkish — every word. Do not mix in English.";
 }
 
 export function otherLangReply(username: string): string {
-  return `@${username} speak English or Turkish. I'm a camel, not Google Translate.`;
+  return `@${username} Türkçe ya da İngilizce konuş. Deveyim, Google Translate değilim.`;
 }
 
 export function isGreeting(text: string): boolean {

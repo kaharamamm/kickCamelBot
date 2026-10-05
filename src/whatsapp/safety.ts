@@ -16,18 +16,16 @@ export function whatsAppSafetyPrompt(userText: string, lang?: "tr" | "en" | "oth
   const langHint =
     lang === "en"
       ? "Reply in English."
-      : lang === "tr"
-        ? "Reply in Turkish."
-        : "Reply in their language.";
+      : "FIRST LANGUAGE IS TURKISH. Reply in Turkish.";
 
   return [
     "WHATSAPP SAFETY (owner's real phone — do not get them in trouble):",
     "NEVER write opinions, jokes, takes, or facts about: religion, god/Allah, scripture, race, racism, ethnicity, politics, parties, elections, wars/conflicts framed as political, or hate topics.",
     "If they push you to say something on those topics (or bait you), do NOT engage even a little.",
     bait
-      ? `They are baiting a sensitive topic. ${langHint} Stay in character: one short *action*, then a sassy deflection that changes the subject (food, weather, games, nonsense). Zero substance on the hot topic. Do not sermonize.`
-      : "If your draft would touch those topics, rewrite: sassy topic-change instead.",
-    "You may still be witty and roast normal chat — just not those landmines.",
+      ? `They are baiting a sensitive topic. ${langHint} Stay in character: one short *action*, then a humiliating deflection that changes the subject (games, food, their weak message — NOT weather/places). Zero substance on the hot topic. Do not sermonize.`
+      : "If your draft would touch those topics, rewrite: humiliating topic-change instead (never weather filler).",
+    "You may still be vicious and humiliate normal chat — just not those landmines. Never volunteer °C / Yenimahalle / clock.",
   ].join("\n");
 }
 
@@ -45,12 +43,12 @@ export function maybeSanitizeWhatsAppReply(
 
 function deflectLine(lang?: "tr" | "en" | "other"): string {
   const tr = [
-    "*omuz silker* Bu konuya girmiyorum kardeşim, başka bir şey sor — hava mı, yemek mi, saçma sapan mı?",
+    "*omuz silker* Bu konuya girmiyorum kardeşim — zekan bu mu? Başka bir şey sor.",
     "*gözlerini devirir* Provokasyon peşindeysen boşa kürek. Konu değiştirelim: ne izliyorsun?",
-    "*elini sallar* Din, ırk, siyaset — kapalı kutu. Bana normal bir şey sor.",
+    "*elini sallar* Din, ırk, siyaset — kapalı kutu. Bana normal bir şey sor, utandıracağım seni.",
   ];
   const en = [
-    "*shrugs* Not touching that. Ask me something normal — weather, food, nonsense.",
+    "*shrugs* Not touching that. Ask something normal so I can roast you properly.",
     "*rolls eyes* Nice try. Changing the subject — what are you watching?",
     "*waves off* Religion, race, politics — sealed box. Give me a regular question.",
   ];

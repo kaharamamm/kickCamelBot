@@ -640,6 +640,38 @@ export async function sendWhatsAppText(chatId: string, text: string): Promise<bo
   return true;
 }
 
+/** Send an image (JPEG/PNG/WebP) to an allowlisted chat. */
+export async function sendWhatsAppImage(
+  chatId: string,
+  image: Buffer,
+  opts?: { caption?: string; mime?: string },
+): Promise<boolean> {
+  if (!image?.length) {
+    lastError = "Empty image";
+    return false;
+  }
+  if (!chatIsAllowlisted(chatId)) {
+    lastError = "Refused: chat is not on the WhatsApp allowlist";
+    return false;
+  }
+  if (!sock || !connected) {
+    lastError = "WhatsApp is not connected";
+    return false;
+  }
+  const caption = stripKickEmoteTokens(opts?.caption ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 1000);
+  if (caption) rememberOutbound(chatId, caption);
+  await sock.sendMessage(chatId, {
+    image,
+    caption: caption || undefined,
+    mimetype: opts?.mime || "image/jpeg",
+  });
+  noteWhatsAppReply();
+  return true;
+}
+
 export async function sendWhatsAppTest(chatId: string): Promise<{ ok: boolean; error?: string }> {
   const ok = await sendWhatsAppText(chatId, "CamelBot WhatsApp test — allowlist works.");
   return ok ? { ok: true } : { ok: false, error: lastError ?? "Send failed" };

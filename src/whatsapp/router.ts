@@ -2,7 +2,6 @@ import { isJidGroup, type WAMessage, type WASocket } from "@whiskeysockets/baile
 import { asksAboutStreamer, calledTheBot, calledTheMods, replyWithAi } from "../bot/ai.js";
 import { botFail, botOk, botThink } from "../bot/activityLog.js";
 import { rememberThread, stillTalkingToUs } from "../bot/conversation.js";
-import { detectLang } from "../bot/lang.js";
 import { noteExchange, rememberPerson } from "../bot/memory.js";
 import {
   chatIsAllowlisted,
@@ -10,6 +9,7 @@ import {
   getWhatsAppSelfJids,
   isWhatsAppSelfChat,
   noteWhatsAppSeen,
+  sendWhatsAppImage,
   sendWhatsAppText,
   waUserKey,
   whatsappStatus,
@@ -17,6 +17,7 @@ import {
 import { isWhatsAppPaused } from "./settings.js";
 import { hasWhatsAppBotCue, meantForWhatsAppBot, messageTagsOwner, shouldReplyInWhatsAppGroup } from "./address.js";
 import { noteWhatsAppEmojisFromText } from "./emotes.js";
+import { generateWhatsAppImage, parseWhatsAppDrawRequest } from "./draw.js";
 
 function senderJid(msg: WAMessage): string {
   if (msg.key.participant) return msg.key.participant;
@@ -66,6 +67,8 @@ export async function handleWhatsAppMessage(_socket: WASocket, msg: WAMessage): 
   const userKey = waUserKey(from);
   const roomId = chatId;
 
+  rememberPerson({ user_id: userKey, username: who }, content, { source: "whatsapp" });
+
   const continuing = stillTalkingToUs(roomId, userKey, content, undefined, false);
   const taggedOwner = messageTagsOwner(msg, getWhatsAppSelfJids(), whatsappStatus().phone);
   const calledBot = calledTheBot(content);
@@ -89,11 +92,39 @@ export async function handleWhatsAppMessage(_socket: WASocket, msg: WAMessage): 
     `[whatsapp] ${group ? "group" : selfChat ? "self" : "dm"} ${who}${taggedOwner ? " (tagged owner)" : ""}: ${content.slice(0, 80)}`,
   );
 
-  rememberPerson({ user_id: userKey, username: who }, content);
-
-  const lang = detectLang(content, userKey);
+  // TEMP: always Turkish — language detector was misfiring
+  const lang = "tr" as const;
 
   try {
+    const drawPrompt = parseWhatsAppDrawRequest(content);
+    if (drawPrompt) {
+      botThink("whatsapp", `Drawing: ${drawPrompt.slice(0, 80)}`);
+      await sendWhatsAppText(
+        chatId,
+        `*parmaklarını çıtlatır* Tamam çiziyorum ama bu yaratıcılık seviyesi utanç verici: ${drawPrompt}`,
+      );
+      const drawn = await generateWhatsAppImage(drawPrompt);
+      if (!drawn.ok) {
+        await sendWhatsAppText(chatId, drawn.error);
+        botFail("whatsapp", drawn.error);
+        return;
+      }
+      const caption = `*alaycı bakar* Buyur, makineye “${drawn.prompt}” çizdirdin. Gurur duy.`;
+      const ok = await sendWhatsAppImage(chatId, drawn.buffer, {
+        caption,
+        mime: drawn.mime,
+      });
+      if (!ok) {
+        botFail("whatsapp", "Image send failed");
+        await sendWhatsAppText(chatId, "Görseli gönderemedim.");
+        return;
+      }
+      noteExchange(userKey, who, content, `[image] ${drawn.prompt}`, { source: "whatsapp" });
+      rememberThread(roomId, userKey);
+      botOk("whatsapp", `Drew for ${who}: ${drawn.prompt.slice(0, 60)}`);
+      return;
+    }
+
     const reply = await replyWithAi(
       {
         sender: { user_id: userKey, username: who },
@@ -124,7 +155,7 @@ export async function handleWhatsAppMessage(_socket: WASocket, msg: WAMessage): 
       return;
     }
 
-    noteExchange(userKey, who, content, reply);
+    noteExchange(userKey, who, content, reply, { source: "whatsapp" });
     rememberThread(roomId, userKey);
     botOk("whatsapp", `Replied to ${who}`);
   } catch (err) {

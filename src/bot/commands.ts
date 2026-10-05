@@ -555,9 +555,9 @@ async function handleRewards(): Promise<string> {
 async function handleDraw(who: string, args: string): Promise<string> {
   const prompt = args.replace(/\s+/g, " ").trim();
   if (prompt.length < 3) return `@${who} tell me what to draw. Example: ${config.bot.prefix}draw bald camel in ancient armor`;
-  const clipped = prompt.slice(0, 180);
-  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(clipped)}?nologo=true&width=1024&height=1024&seed=${Date.now() % 99999}`;
-  return `@${who} ${clipped} → ${url}`;
+  const { buildDrawImageUrl } = await import("../whatsapp/draw.js");
+  const url = buildDrawImageUrl(prompt);
+  return `@${who} ${prompt.slice(0, 180)} → ${url}`;
 }
 
 export async function runScheduledCommand(name: string): Promise<string | null> {

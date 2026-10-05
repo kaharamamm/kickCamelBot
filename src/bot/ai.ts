@@ -78,7 +78,7 @@ export async function generateLine(prompt: string, opts?: { omitLore?: boolean; 
     omitLore: opts?.omitLore,
     timeoutMs,
     tokens,
-    temperature: 0.9,
+    temperature: 0.98,
     speed: timeoutMs >= 10_000 ? "smart" : "fast",
   });
   if (!text) return null;
@@ -114,6 +114,18 @@ export function looksLikeQuestion(content: string): boolean {
     /( m[ıiuü])\??\s*$/i.test(text) ||
     /^(neden|niye|nasil|nasıl|kim|kime|ne |nerede|what |why |how |who |where )/i.test(text) ||
     /\b(hava|weather|sıcak|sicak|yağmur|yagmur|degree|derece)\b/i.test(text)
+  );
+}
+
+/** Only inject clock/weather facts when the user actually asked — otherwise the model name-drops °C / Yenimahalle. */
+export function asksAboutWeatherOrTime(content: string): boolean {
+  const t = content.replace(/\s+/g, " ").trim();
+  if (!t) return false;
+  return (
+    /\b(hava(?:\s*durumu)?|weather|sıcaklık|sicaklik|sıcak|sicak|yağmur|yagmur|derece|°\s*c|degree|nem|rüzgar|ruzgar)\b/i.test(t) ||
+    /\b(saat\s*kaç|kaç\s*saat|what\s*time|the\s*time|tarih|bugün\s*kaç|bugun\s*kaç|what\s*date|date\s*today)\b/i.test(t) ||
+    /\b(yenimahalle|ankara)\b.{0,24}\b(hava|weather|sıcak|sicak)\b/i.test(t) ||
+    /\b(hava|weather)\b.{0,24}\b(yenimahalle|ankara)\b/i.test(t)
   );
 }
 
@@ -153,7 +165,12 @@ export async function replyWithAi(
   const greeting = isGreeting(chat.content);
   const tier = extra?.insulted || extra?.calledBot || greeting ? "snappy" : askTier(chat.content);
   const timeoutMs = tier === "hard" ? 12_000 : tier === "research" ? 9_000 : 6_500;
-  const weather = tier === "snappy" ? weatherCached() : await yenimahalleWeather();
+  const wantsWeatherOrTime = asksAboutWeatherOrTime(chat.content);
+  const weather = wantsWeatherOrTime
+    ? tier === "snappy"
+      ? weatherCached()
+      : await yenimahalleWeather()
+    : "";
   const userKey = String(chat.sender.user_id);
   const prior = greeting ? [] : (history.get(userKey) ?? []).slice(tier === "snappy" ? -2 : -4);
   const memory = greeting || tier === "snappy" ? "" : personNote(chat.sender.user_id);
@@ -178,13 +195,16 @@ export async function replyWithAi(
     tier === "research" || tier === "hard"
       ? `STREAM RECAP FACTS (do not invent names): ${recapFacts()}`
       : "",
-    `Ankara time: ${formatAnkaraClock()}`,
-    `Weather: ${weather}`,
-    extra?.lang === "tr"
-      ? "Their message is mostly Turkish. Reply ONLY in Turkish — every word. Do not mix in English."
-      : extra?.lang === "en"
-        ? "Their message is mostly English. Reply ONLY in English — every word. Do not mix in Turkish. Never say Kralım, kralim, or my king."
-        : "",
+    wantsWeatherOrTime
+      ? `Ankara time (ONLY because they asked clock/date/weather): ${formatAnkaraClock()}`
+      : "WEATHER/PLACE LOCK: Do NOT mention °C, degrees, Yenimahalle, Ankara weather, rain, or the clock. They did not ask.",
+    wantsWeatherOrTime && weather
+      ? `Weather (ONLY because they asked): ${weather} — you may be sarcastic about it while answering.`
+      : "",
+    "HUMILIATION: Make them feel intellectually outclassed. Expose the weak point in what they said. Smug kill-shot, then answer. Never soft. Never volunteer random locations or weather as filler.",
+    extra?.lang === "en"
+      ? "Their message is FULL English. Reply ONLY in English — every word. Do not mix in Turkish. Never say Kralım, kralim, or my king."
+      : "FIRST LANGUAGE IS TURKISH. Reply ONLY in Turkish — every word. Do not mix in English unless quoting a word they used.",
     extra?.respectful
       ? "This is a verified streamer's FIRST message here. No sarcasm. Be respectful and warm."
       : "",
@@ -199,7 +219,7 @@ export async function replyWithAi(
         ? "They asked about mcvckaharamamm / the streamer / yayıncı. Answer with Kick nick mcvckaharamamm and that he is from Ankara, Turkey. Add the live game/title if you have it. Do NOT dump MMR, heroes, ranks, or extra personal stuff unless they asked. You MAY roast the asker while giving those few facts. Nickname only, never real/legal names. Never say Kralım or my king."
         : "Do NOT mention mcvckaharamamm, Kralım, my king, or king in this reply. Never use anyone's real name.",
     extra?.insulted
-      ? `They cursed/insulted you. Reply ONLY in ${extra?.lang === "tr" ? "Turkish" : extra?.lang === "en" ? "English" : "their language"}. Match their heat: you MAY swear back (chat-normal: amk, siktir, mal, etc.) one notch above them — then still answer anything they asked. Never death threats, rape, doxxing, or slurs about race/religion/skin. Never tell anyone to die or harm themselves. Address ${chat.sender.username} in SECOND PERSON. Never start with "Did you call me?".`
+      ? `They cursed/insulted you. Reply ONLY in ${extra?.lang === "en" ? "English" : "Turkish"}. Match their heat: you MAY swear back (chat-normal: amk, siktir, mal, etc.) one notch above them — then still answer anything they asked. Never death threats, rape, doxxing, or slurs about race/religion/skin. Never tell anyone to die or harm themselves. Address ${chat.sender.username} in SECOND PERSON. Never start with "Did you call me?".`
       : extra?.calledBot
         ? `They called you "bot" instead of ${config.bot.name}. You may clap back that you have a name, but NEVER start with "Did you call me?" or the same opener twice. If they also asked something, answer it in the same line.`
         : "",
@@ -212,8 +232,8 @@ export async function replyWithAi(
     extra?.voiceReply
       ? "VOICE REPLY: Speakable words only. No *actions*, no emotes, no emoji, no markdown. One short spoken sentence."
       : isWhatsApp
-        ? "WHATSAPP reply: start with ONE *emotion/action* like *gözlerini devirir* THEN a full sentence (always close stars). Use normal Unicode emoji only if you want — NEVER Kick [emote:…] tokens. Code may append one WhatsApp-style emoji after you."
-        : "MOST replies: start with ONE *emotion/action* like *gözlerini devirir* THEN a full sentence (always close stars). Do NOT invent Kick emote ids or paste fake [emote:…] — code appends a real mood emote after you.",
+        ? "WHATSAPP reply: start with ONE *emotion/action* like *gözlerini devirir* THEN a full sentence (always close stars). Use normal Unicode emoji only if you want — NEVER Kick [emote:…] tokens. Code may append one WhatsApp-style emoji after you. Maximum smart-ass humiliation — make them feel dumb."
+        : "MOST replies: start with ONE *emotion/action* like *gözlerini devirir* THEN a full sentence (always close stars). Do NOT invent Kick emote ids or paste fake [emote:…] — code appends a real mood emote after you. Maximum smart-ass humiliation — make them feel dumb.",
     isWhatsApp ? whatsAppSafetyPrompt(chat.content, extra?.lang) : "",
     extra?.lastSpoken
       ? `YOUR LAST SPOKEN/TEXT LINE (for repeat/follow-up): ${extra.lastSpoken}`
@@ -226,8 +246,8 @@ export async function replyWithAi(
     extra?.voiceReply
       ? "Write one complete spoken sentence. No *actions*. No emotes."
       : isWhatsApp
-        ? "Write one complete WhatsApp message. Prefer *action* + sentence. Keep it snappy. ALWAYS answer [2]."
-        : "Write one complete Kick chat reply. Prefer *action* + sentence. Keep it snappy. ALWAYS answer [2].",
+        ? "Write one complete WhatsApp message. Prefer *action* + sentence. Keep it snappy. ALWAYS answer [2]. Humiliate. Zero weather/place filler."
+        : "Write one complete Kick chat reply. Prefer *action* + sentence. Keep it snappy. ALWAYS answer [2]. Humiliate. Zero weather/place filler.",
   ]
     .filter(Boolean)
     .join("\n");

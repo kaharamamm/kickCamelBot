@@ -23,6 +23,8 @@ const LORE_OTHERS = [
   "kaiserdoto",
 ];
 
+export type MemorySource = "kick" | "whatsapp" | "discord";
+
 type Person = {
   username: string;
   nick?: string;
@@ -30,6 +32,8 @@ type Person = {
   summary: string;
   lastAt: number;
   lastSummaryAt: number;
+  /** Where we mainly know them from (WhatsApp uses phone/display name, not Kick bio). */
+  source?: MemorySource;
 };
 
 const people = new Map<number, Person>();
@@ -285,6 +289,7 @@ export function listPeople(): Array<{
   bio?: string;
   summary: string;
   lastAt: number;
+  source?: MemorySource;
 }> {
   hydrate();
   mergeDuplicatePeople();
@@ -303,6 +308,7 @@ export function listPeople(): Array<{
       bio: row.bio,
       summary: row.summary,
       lastAt: row.lastAt,
+      source: row.source,
     }));
 }
 
@@ -339,33 +345,45 @@ export function seedPersonMemory(userId: number, username: string, summary: stri
   persist();
 }
 
-export function rememberPerson(actor: KickActor, lastText?: string): void {
+export function rememberPerson(
+  actor: KickActor,
+  lastText?: string,
+  opts?: { source?: MemorySource },
+): void {
   if (!actor.user_id) return;
   hydrate();
   const id = resolvePersonId(actor.user_id, actor.username);
   const mapped = { ...actor, user_id: id };
-  if (lastText?.trim()) queueSummary(mapped, lastText);
+  if (lastText?.trim()) queueSummary(mapped, lastText, opts?.source);
+  else if (opts?.source) upsertPerson(mapped, opts.source);
 }
 
-export function noteExchange(userId: number, username: string, userText: string, _botText?: string): void {
+export function noteExchange(
+  userId: number,
+  username: string,
+  userText: string,
+  _botText?: string,
+  opts?: { source?: MemorySource },
+): void {
   if (!userId || !userText.trim()) return;
-  rememberPerson({ user_id: userId, username }, userText);
+  rememberPerson({ user_id: userId, username }, userText, opts);
 }
 
-function queueSummary(actor: KickActor, userText: string): void {
+function queueSummary(actor: KickActor, userText: string, source?: MemorySource): void {
   const buf = buffers.get(actor.user_id) ?? [];
   buf.push(userText.replace(/\s+/g, " ").trim().slice(0, 160));
   if (buf.length > 12) buf.splice(0, buf.length - 12);
   buffers.set(actor.user_id, buf);
   const existing = people.get(actor.user_id);
+  upsertPerson(actor, source);
   const unique = new Set(buf.map((line) => line.toLowerCase())).size;
   if (!existing?.summary && unique < MIN_LINES_FOR_SUMMARY) return;
-  upsertPerson(actor);
   scheduleSummary(actor.user_id);
 }
 
-function upsertPerson(actor: KickActor): void {
+function upsertPerson(actor: KickActor, source?: MemorySource): void {
   const existing = people.get(actor.user_id);
+  const src = source ?? existing?.source ?? "kick";
   people.set(actor.user_id, {
     username: actor.username,
     nick: existing?.nick || actor.username,
@@ -373,9 +391,10 @@ function upsertPerson(actor: KickActor): void {
     summary: existing?.summary ?? "",
     lastAt: Date.now(),
     lastSummaryAt: existing?.lastSummaryAt ?? 0,
+    source: src,
   });
   persist();
-  if (!existing?.bio) void enrichBio(actor.user_id, actor.username);
+  if (src !== "whatsapp" && !existing?.bio) void enrichBio(actor.user_id, actor.username);
 }
 
 function scheduleSummary(userId: number): void {
@@ -421,14 +440,19 @@ async function summarize(userId: number): Promise<void> {
   const source = ownLines.join(" ");
   const prev = tidyStoredSummary(row.username, row.summary ?? "", userId, row.nick, source);
   const { generateRaw } = await import("./ai.js");
+  const isWa = row.source === "whatsapp";
   const raw = await generateRaw(
     [
-      `Subject: Kick chatter "${row.nick || row.username}" (id ${userId}).`,
-      row.bio ? `Their Kick bio: ${row.bio}` : "",
+      isWa
+        ? `Subject: WhatsApp contact "${row.nick || row.username}" (id ${userId}).`
+        : `Subject: Kick chatter "${row.nick || row.username}" (id ${userId}).`,
+      row.bio && !isWa ? `Their Kick bio: ${row.bio}` : "",
       prev ? `Existing note about this person only: ${prev}` : "No previous note.",
-      `ONLY this person's own chat lines:\n${ownLines.map((l) => `- ${l}`).join("\n")}`,
-      "Write one compact English operator note under 180 characters about THIS person: lasting traits, how they usually talk, roastable bits from THEIR lines or bio.",
-      "Do not treat one-off orders to the bot (calm down, sakin ol, answer me, shut up) as personality.",
+      `ONLY this person's own messages:\n${ownLines.map((l) => `- ${l}`).join("\n")}`,
+      isWa
+        ? "Write one compact English operator note under 180 characters about THIS WhatsApp contact: how they talk, recurring topics, attitude toward the bot, roastable habits from THEIR lines."
+        : "Write one compact English operator note under 180 characters about THIS person: lasting traits, how they usually talk, roastable bits from THEIR lines or bio.",
+      "Do not treat one-off orders to the bot (calm down, sakin ol, answer me, shut up, bot çiz) as personality.",
       "Do not mash unrelated lines into one story. If they greeted chat, that is not 'telling everyone to stay calm'.",
       "Do not mention other chatters. Do not copy streamer lore, Dota heroes, Meepo, or hair jokes unless THIS person said those things about themselves.",
       "Do not start with the username. Do not write Turkish.",

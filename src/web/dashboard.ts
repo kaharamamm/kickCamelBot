@@ -506,7 +506,7 @@ async function whatsappBody(): Promise<string> {
           </div>
         </div>
       </div>
-      <p class="muted" style="margin-top:.8rem">Tick chats/groups below → Save allowlist. Unticked = silence. Groups need <code>bot</code> / <code>CamelBot</code> / <code>camel</code> (or a short follow-up). 1:1 DMs reply to every message.</p>
+      <p class="muted" style="margin-top:.8rem">Tick chats/groups below → Save allowlist. Unticked = silence. Groups need <code>bot</code> / <code>CamelBot</code> / <code>camel</code> (or a short follow-up). 1:1 DMs reply to every message. Ask <code>bot çiz keller</code> or <code>bot keller çiz</code> / <code>bot draw …</code> for an image.</p>
       <div class="row">
         <form method="post" action="/whatsapp/refresh"><button type="submit">Refresh lists</button></form>
         <form method="post" action="/whatsapp/pause">
@@ -1318,12 +1318,13 @@ function memoryBody(page: number): string {
       const you = p.userId === KING_ID;
       const nick = p.nick && p.nick !== p.username ? ` · nick ${escapeHtml(p.nick)}` : "";
       const bio = p.bio ? `<div class="muted">Bio: ${escapeHtml(p.bio)}</div>` : "";
+      const wa = p.source === "whatsapp";
       const note = p.summary
         ? escapeHtml(p.summary)
-        : "<span class='muted'>No summary yet — appears after they talk with CamelBot.</span>";
+        : "<span class='muted'>No summary yet — building from their messages in allowlisted chats.</span>";
       return `<li style="align-items:flex-start">
         <span class="grow">
-          <strong>@${escapeHtml(p.username)}</strong>${you ? ' <span class="tag">you</span>' : ""}
+          <strong>${wa ? escapeHtml(p.username) : `@${escapeHtml(p.username)}`}</strong>${you ? ' <span class="tag">you</span>' : ""}${wa ? ' <span class="tag dim">whatsapp</span>' : ""}
           <span class="muted">${nick} · last ${escapeHtml(formatAnkaraShort(p.lastAt))}</span>
           ${bio}
           <div>${note}</div>
@@ -1337,7 +1338,7 @@ function memoryBody(page: number): string {
       <h2>Memory</h2>
       <a class="btn" href="/memory?p=${sliced.page}">Refresh</a>
     </div>
-    <p class="muted">Room summary of what chat is talking about, plus short notes per person (Kick nick, bio, chats with the bot). Person notes appear after 5 real chat lines.</p>
+    <p class="muted">Room summary of what chat is talking about, plus short notes per person (Kick nick/bio or WhatsApp display name). Person notes appear after 5 real chat lines — WhatsApp allowlisted chats update memory even when the bot stays quiet in groups.</p>
     <h3>Chat summary</h3>
     <ul class="list">${roomRows}</ul>
     <h3>People</h3>
