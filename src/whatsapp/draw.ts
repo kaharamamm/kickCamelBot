@@ -16,7 +16,7 @@ export function parseWhatsAppDrawRequest(content: string): string | null {
   const t = content.replace(/\s+/g, " ").trim();
   if (!t) return null;
 
-  const bot = String.raw`(?:[@]?\s*)?(?:camel\s*bot|camelbot|camel|bots?(?:u|lar|um)?)`;
+  const bot = String.raw`(?:[@]?\s*)?(?:camel[\s_-]*bots?|cambot|camlbot|camlebot|camebot|camelbt|kamelbot|camalbot|camel|bots?(?:u|lar|um)?)`;
   const drawVerb = String.raw`(?:çiz|ciz|draw|image|resim(?:\s*(?:çiz|ciz|yap))?)`;
 
   const patterns: RegExp[] = [
@@ -45,14 +45,22 @@ export function parseWhatsAppDrawRequest(content: string): string | null {
     let prompt = m?.[1]?.trim() ?? "";
     // Strip leftover draw/bot words if any
     prompt = prompt
-      .replace(/^(?:[@]?\s*)?(?:camel\s*bot|camelbot|camel|bots?(?:u|lar|um)?)\s+/i, "")
-      .replace(/\s+(?:[@]?\s*)?(?:camel\s*bot|camelbot|camel|bots?(?:u|lar|um)?)$/i, "")
+      .replace(
+        /^(?:[@]?\s*)?(?:camel[\s_-]*bots?|cambot|camlbot|camlebot|camebot|camelbt|kamelbot|camalbot|camel|bots?(?:u|lar|um)?)\s+/i,
+        "",
+      )
+      .replace(
+        /\s+(?:[@]?\s*)?(?:camel[\s_-]*bots?|cambot|camlbot|camlebot|camebot|camelbt|kamelbot|camalbot|camel|bots?(?:u|lar|um)?)$/i,
+        "",
+      )
       .replace(/^(?:çiz|ciz|draw|image|resim)\s+/i, "")
       .replace(/\s+(?:çiz|ciz|draw|image|resim)$/i, "")
       .trim();
     if (
       prompt.length >= 2 &&
-      !/^(?:bot|camel|camelbot|lütfen|lutfen|pls|please|bunu|şunu|sunu|onu|nasıl|nasil|ne|what|how)$/i.test(prompt)
+      !/^(?:bot|camel|camelbot|cambot|lütfen|lutfen|pls|please|bunu|şunu|sunu|onu|nasıl|nasil|ne|what|how)$/i.test(
+        prompt,
+      )
     ) {
       return prompt.slice(0, 180);
     }

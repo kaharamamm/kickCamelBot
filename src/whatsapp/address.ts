@@ -1,11 +1,11 @@
 import { getContentType, jidNormalizedUser, type WAMessage } from "@whiskeysockets/baileys";
-import { calledTheBot, looksLikeQuestion, shouldTalkToAi } from "../bot/ai.js";
+import { calledTheBot, looksLikeQuestion, mentionsCamelBot, shouldTalkToAi } from "../bot/ai.js";
 import { config } from "../config.js";
 import { parseWhatsAppDrawRequest } from "./draw.js";
 
-/** Bot-address cues (CamelBot / camel / bot…), same spirit as Kick. */
+/** Bot-address cues (CamelBot / camelbot / cambot / camel / bot…). */
 export function hasWhatsAppBotCue(content: string): boolean {
-  if (shouldTalkToAi(content)) return true;
+  if (mentionsCamelBot(content) || shouldTalkToAi(content)) return true;
   if (calledTheBot(content)) return true;
   if (/\bcamel\s*bot\b/i.test(content)) return true;
   const name = config.bot.name.toLowerCase();
@@ -27,20 +27,22 @@ export function meantForWhatsAppBot(content: string): boolean {
 
   if (!hasWhatsAppBotCue(t)) return false;
 
-  // Direct address at start: "bot …", "CamelBot …", "@camel …"
+  // Direct address at start: "bot …", "CamelBot …", "cambot …", "@camel …"
   if (
-    /^(?:[@]?\s*)?(?:camel\s*bot|camelbot|camel|bots?(?:u|lar|um)?)\b/i.test(t)
+    /^(?:[@]?\s*)?(?:camel[\s_-]*bots?|cambot|camlbot|camlebot|camebot|camelbt|kamelbot|camalbot|camel|bots?(?:u|lar|um)?)\b/i.test(
+      t,
+    )
   ) {
     return true;
   }
 
-  // Name / @camel style from Kick helper
-  if (shouldTalkToAi(t)) return true;
+  // Name / @camel / fuzzy CamelBot
+  if (mentionsCamelBot(t) || shouldTalkToAi(t)) return true;
 
   // Question or ask verbs near a bot cue
   if (looksLikeQuestion(t)) return true;
   if (
-    /\b(bot|camelbot|camel)\b/i.test(t) &&
+    /\b(bot|camelbot|cambot|camel)\b/i.test(t) &&
     /\b(söyle|soyle|anlat|yap|bak|gel|cevapla|cevap|answer|reply|tell|say|what|why|how|who|when|where|ne |niye|neden|nasıl|nasil|kim|kaç|kac|kaçta|kacta|çiz|ciz|draw)\b/i.test(
       t,
     )

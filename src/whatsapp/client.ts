@@ -56,6 +56,14 @@ let messagesSeen = 0;
 let repliesSent = 0;
 let lastMessageAt: number | null = null;
 let lastReplyAt: number | null = null;
+/**
+ * Only answer messages with timestamp at/after this instant.
+ * Set on each successful WhatsApp connect so reconnect history cannot spam replies.
+ */
+let listenFromMs = Date.now();
+/** Message ids already handed to the router this process (dedupe notify+append). */
+const handledMsgIds = new Set<string>();
+const HANDLED_MSG_LIMIT = 500;
 
 function isUserJid(id: string): boolean {
   return id.endsWith("@s.whatsapp.net") || id.endsWith("@lid");
@@ -292,6 +300,9 @@ export async function startWhatsApp(): Promise<void> {
 async function connectWhatsApp(): Promise<void> {
   mkdirSync(authDir, { recursive: true });
   reloadWhatsAppSettings();
+  // Ignore anything that already happened before this connect attempt.
+  listenFromMs = Date.now();
+  handledMsgIds.clear();
 
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
   const { version } = await fetchLatestBaileysVersion();
@@ -339,6 +350,9 @@ async function connectWhatsApp(): Promise<void> {
       qrDataUrl = null;
       qrUpdatedAt = null;
       lastError = null;
+      // Drop any backlog from before this session — only answer forward from now.
+      listenFromMs = Date.now();
+      handledMsgIds.clear();
       const me = socket.user?.id ? jidNormalizedUser(socket.user.id) : null;
       phone = me ? me.split("@")[0]?.split(":")[0] ?? null : null;
       rememberSelfJid(socket.user?.id);
@@ -346,7 +360,7 @@ async function connectWhatsApp(): Promise<void> {
       if (phone) rememberSelfJid(`${phone}@s.whatsapp.net`);
       botOk("whatsapp", phone ? `Linked +${phone}` : "Linked");
       console.log(
-        `[whatsapp] connected${phone ? ` as +${phone}` : ""} selfJids=${getWhatsAppSelfJids().join(",")}`,
+        `[whatsapp] connected${phone ? ` as +${phone}` : ""} listenFrom=${new Date(listenFromMs).toISOString()} selfJids=${getWhatsAppSelfJids().join(",")}`,
       );
       void refreshWhatsAppDirectory().catch((err) => {
         console.warn("[whatsapp] directory sync failed", err);
@@ -390,14 +404,32 @@ async function connectWhatsApp(): Promise<void> {
       console.log(
         `[whatsapp] upsert type=${type} fromMe=${Boolean(msg.key.fromMe)} jid=${msg.key.remoteJid ?? "?"} text=${JSON.stringify(preview)}`,
       );
-      // Old history sync — discover chats, do not AI-reply. Fresh appends (incl. phone → linked) still process.
-      if (type === "append" && !msg.key.fromMe && messageAgeMs(msg) > 90_000) {
-        const chatId = msg.key.remoteJid;
+
+      const chatId = msg.key.remoteJid;
+      // Always learn directory from history, but never AI-reply to pre-listen backlog.
+      if (isHistoryBacklog(msg, type)) {
         if (chatId && isJidGroup(chatId)) rememberWhatsAppGroup(chatId);
         else if (chatId) rememberWhatsAppChat(chatId, msg.pushName || undefined);
+        console.log(
+          `[whatsapp] skip pre-listen backlog type=${type} ageMs=${messageAgeMs(msg)} text=${JSON.stringify(preview)}`,
+        );
         continue;
       }
-      void enqueueWork(`wa:${msg.key.remoteJid ?? "x"}`, () => onInbound(socket, msg, type)).catch((err) => {
+
+      const mid = msg.key.id;
+      if (mid) {
+        if (handledMsgIds.has(mid)) {
+          console.log(`[whatsapp] skip duplicate id=${mid}`);
+          continue;
+        }
+        handledMsgIds.add(mid);
+        if (handledMsgIds.size > HANDLED_MSG_LIMIT) {
+          const first = handledMsgIds.keys().next().value;
+          if (first) handledMsgIds.delete(first);
+        }
+      }
+
+      void enqueueWork(`wa:${chatId ?? "x"}`, () => onInbound(socket, msg, type)).catch((err) => {
         lastError = err instanceof Error ? err.message : String(err);
         console.warn("[whatsapp] message handler", err);
       });
@@ -527,13 +559,36 @@ function isRecentOutbound(chatId: string, text: string): boolean {
   return true;
 }
 
-function messageAgeMs(msg: WAMessage): number {
+function messageTimestampMs(msg: WAMessage): number | null {
   const raw = msg.messageTimestamp;
-  if (raw == null) return 0;
+  if (raw == null) return null;
   const n = typeof raw === "number" ? raw : Number(raw);
-  if (!Number.isFinite(n) || n <= 0) return 0;
-  const ms = n > 1e12 ? n : n * 1000;
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n > 1e12 ? n : n * 1000;
+}
+
+function messageAgeMs(msg: WAMessage): number {
+  const ms = messageTimestampMs(msg);
+  if (ms == null) return 0;
   return Math.max(0, Date.now() - ms);
+}
+
+/**
+ * True for reconnect/history backlog that must not trigger replies.
+ * Only messages timestamped at/after this WhatsApp session's listenFrom are live.
+ */
+function isHistoryBacklog(msg: WAMessage, upsertType: string): boolean {
+  const ts = messageTimestampMs(msg);
+  if (ts != null) {
+    // Strict: anything before this connect is past — do not answer.
+    if (ts < listenFromMs) return true;
+    return false;
+  }
+  // No timestamp: treat append/history as backlog; during the first few seconds after
+  // connect, also skip notify (Baileys often dumps buffered lines without a clean stamp).
+  if (upsertType !== "notify") return true;
+  if (Date.now() - listenFromMs < 8_000) return true;
+  return false;
 }
 
 async function onInbound(socket: WASocket, msg: WAMessage, upsertType?: string): Promise<void> {

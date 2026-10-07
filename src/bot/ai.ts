@@ -85,18 +85,81 @@ export async function generateLine(prompt: string, opts?: { omitLore?: boolean; 
   return clipAi(stripBotTags(text));
 }
 
+function foldBotToken(word: string): string {
+  return word
+    .toLowerCase()
+    .normalize("NFKC")
+    .replace(/[’']/g, "")
+    .replace(/ı/g, "i")
+    .replace(/İ/g, "i")
+    .replace(/ş/g, "s")
+    .replace(/ğ/g, "g")
+    .replace(/ü/g, "u")
+    .replace(/ö/g, "o")
+    .replace(/ç/g, "c");
+}
+
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  const rows = a.length + 1;
+  const cols = b.length + 1;
+  const prev = new Array<number>(cols);
+  const cur = new Array<number>(cols);
+  for (let j = 0; j < cols; j++) prev[j] = j;
+  for (let i = 1; i < rows; i++) {
+    cur[0] = i;
+    const ca = a.charCodeAt(i - 1);
+    for (let j = 1; j < cols; j++) {
+      const cost = ca === b.charCodeAt(j - 1) ? 0 : 1;
+      cur[j] = Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + cost);
+    }
+    for (let j = 0; j < cols; j++) prev[j] = cur[j]!;
+  }
+  return prev[b.length]!;
+}
+
+/**
+ * True when they addressed CamelBot — including camelbot / cambot / camel bot /
+ * light typos. Case and Turkish letters don't matter.
+ */
+export function mentionsCamelBot(content: string): boolean {
+  const raw = content.normalize("NFKC");
+  const text = raw.toLowerCase();
+  const name = foldBotToken(config.bot.name || "camelbot");
+
+  if (text.includes(`@${name}`) || text.includes("@camelbot") || text.includes("@camel")) return true;
+  if (text === name || text.startsWith(`${name} `) || text.endsWith(` ${name}`)) return true;
+
+  // camelbot / camel-bot / camel bot (with optional trailing s)
+  if (/\bcamel[\s_-]*bots?\b/i.test(raw)) return true;
+  // common shortenings / near-misses as whole words
+  if (/\b(?:cambot|camlbot|camlebot|camebot|camelbt|kamelbot|camalbot|camelbots)\b/i.test(raw)) {
+    return true;
+  }
+  // lone "camel" as a word (not camelopard etc. — word boundary)
+  if (/(?:^|[\s,@])camel(?:[\s,?!.:;]|$)/i.test(raw)) return true;
+
+  for (const tok of raw.split(/[^\p{L}\p{N}]+/u)) {
+    if (!tok) continue;
+    const t = foldBotToken(tok);
+    if (t === name || t === "camelbot" || t === "cambot" || t === "camel") return true;
+    // Fuzzy: close to "camelbot" (typos like camlbot, camelbt, cemelbot)
+    if (t.length >= 5 && t.length <= 12 && editDistance(t, "camelbot") <= 2) return true;
+    if (t.length >= 5 && t.length <= 8 && editDistance(t, "cambot") <= 1) return true;
+  }
+  return false;
+}
+
 export function shouldTalkToAi(content: string): boolean {
   if (!anyAiConfigured()) return false;
-  const name = config.bot.name.toLowerCase();
-  const text = content.toLowerCase();
-  if (text.includes(`@${name}`) || text.startsWith(`${name} `) || text === name) return true;
-  if (text.includes("@camel")) return true;
-  return /(?:^|[\s,])camel(?:[\s,?!.]|$)/i.test(content);
+  return mentionsCamelBot(content);
 }
 
 export function calledTheBot(content: string): boolean {
   const text = content.toLowerCase();
-  if (shouldTalkToAi(content)) return false;
+  if (mentionsCamelBot(content)) return false;
   if (/\brobot\b/i.test(text)) return false;
   return /(^|[^a-zığüşöç])bots?(u|lar|um)?(?=$|[^a-zığüşöç])/i.test(text);
 }
